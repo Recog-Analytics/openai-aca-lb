@@ -97,13 +97,25 @@ public class YarpConfiguration
 
             var backendConfig = backends[reverseProxyFeature.AvailableDestinations[0].DestinationId];
 
-            if (!string.IsNullOrEmpty(backendConfig.ApiKey))
+            // Check if client provided an Authorization header (Azure AD token)
+            var clientAuthHeader = context.HttpContext.Request.Headers.Authorization.FirstOrDefault();
+            var hasClientToken = !string.IsNullOrEmpty(clientAuthHeader) && clientAuthHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase);
+
+            if (hasClientToken)
             {
+                // Forward the client's Azure AD token
+                proxyHeaders.Remove("Authorization");
+                proxyHeaders.Add("Authorization", clientAuthHeader);
+            }
+            else if (!string.IsNullOrEmpty(backendConfig.ApiKey))
+            {
+                // Use configured API key if no client token provided
                 proxyHeaders.Remove("api-key");
                 proxyHeaders.Add("api-key", backendConfig.ApiKey);
             }
             else
             {
+                // Fallback to DefaultAzureCredential if no client token and no API key
                 AccessToken accessToken = await new DefaultAzureCredential().GetTokenAsync(new TokenRequestContext(scopes: ["https://cognitiveservices.azure.com/.default"]));
                 proxyHeaders.Remove("Authorization");
                 proxyHeaders.Add("Authorization", "Bearer " + accessToken.Token);
