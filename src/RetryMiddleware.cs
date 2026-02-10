@@ -1,4 +1,5 @@
-﻿using Yarp.ReverseProxy.Model;
+﻿using System.Diagnostics;
+using Yarp.ReverseProxy.Model;
 
 namespace openai_loadbalancer;
 
@@ -6,12 +7,16 @@ public class RetryMiddleware
 {
     private readonly RequestDelegate _next;
     private readonly Dictionary<string, BackendConfig> _backends;
+    private readonly LatencyTracker _latencyTracker;
+    private readonly LatencyConfig _latencyConfig;
     private readonly ILogger _logger;
 
-    public RetryMiddleware(RequestDelegate next, Dictionary<string, BackendConfig> backends, ILoggerFactory loggerFactory)
+    public RetryMiddleware(RequestDelegate next, Dictionary<string, BackendConfig> backends, LatencyTracker latencyTracker, LatencyConfig latencyConfig, ILoggerFactory loggerFactory)
     {
         _next = next;
         _backends = backends;
+        _latencyTracker = latencyTracker;
+        _latencyConfig = latencyConfig;
         _logger = loggerFactory.CreateLogger<RetryMiddleware>();
     }
 
@@ -41,7 +46,13 @@ public class RetryMiddleware
                 context.Response.Clear();
             }
 
+            var stopwatch = Stopwatch.StartNew();
             await _next(context);
+            stopwatch.Stop();
+
+            var proxiedDestination = reverseProxyFeature.ProxiedDestination;
+            if (proxiedDestination != null && context.Response.StatusCode < 400)
+                _latencyTracker.RecordLatency(proxiedDestination.DestinationId, stopwatch.Elapsed.TotalMilliseconds);
 
             var statusCode = context.Response.StatusCode;
             var atLeastOneBackendHealthy = GetNumberHealthyEndpoints(context) > 0;
@@ -75,7 +86,9 @@ public class RetryMiddleware
 
             if (destination.Health.Passive != DestinationHealth.Unhealthy)
             {
-                var destinationPriority = _backends[destination.DestinationId].Priority;
+                var basePriority = _backends[destination.DestinationId].Priority;
+                var isDegraded = _latencyTracker.IsDegraded(destination.DestinationId, _latencyConfig.ThresholdMs);
+                var destinationPriority = isDegraded ? basePriority + 100 : basePriority;
 
                 if (destinationPriority < selectedPriority)
                 {
