@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace openai_loadbalancer;
 
 public class LatencyConfig
@@ -13,17 +15,24 @@ public class LatencyConfig
 
         var windowSize = Environment.GetEnvironmentVariable("LATENCY_WINDOW_SIZE");
         if (windowSize != null)
-            config.WindowSize = Convert.ToInt32(windowSize);
+            config.WindowSize = int.Parse(windowSize, CultureInfo.InvariantCulture);
 
         var minSamples = Environment.GetEnvironmentVariable("LATENCY_MIN_SAMPLES");
         if (minSamples != null)
-            config.MinSamples = Convert.ToInt32(minSamples);
+            config.MinSamples = int.Parse(minSamples, CultureInfo.InvariantCulture);
 
         var thresholdMs = Environment.GetEnvironmentVariable("LATENCY_THRESHOLD_MS");
         if (thresholdMs != null)
-            config.ThresholdMs = Convert.ToDouble(thresholdMs);
+            config.ThresholdMs = double.Parse(thresholdMs, CultureInfo.InvariantCulture);
 
         config.SlackWebhookUrl = Environment.GetEnvironmentVariable("SLACK_WEBHOOK_URL");
+
+        if (config.WindowSize < 1)
+            throw new ArgumentException("LATENCY_WINDOW_SIZE must be >= 1");
+        if (config.MinSamples < 1)
+            throw new ArgumentException("LATENCY_MIN_SAMPLES must be >= 1");
+        if (config.ThresholdMs <= 0)
+            throw new ArgumentException("LATENCY_THRESHOLD_MS must be > 0");
 
         return config;
     }

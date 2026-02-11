@@ -63,37 +63,32 @@ public class LatencyTracker
 
     private void CheckStateTransition(string destinationId)
     {
-        var currentlyDegraded = IsDegraded(destinationId, _thresholdMs);
-        var wasDegraded = _degradedState.GetOrAdd(destinationId, false);
-
-        if (currentlyDegraded == wasDegraded)
+        // Once degraded, stays degraded until container restart (manual recovery by admin)
+        if (_degradedState.TryGetValue(destinationId, out var alreadyDegraded) && alreadyDegraded)
             return;
 
-        _degradedState[destinationId] = currentlyDegraded;
-        var p95 = GetP95(destinationId);
+        var currentlyDegraded = IsDegraded(destinationId, _thresholdMs);
+        if (!currentlyDegraded)
+            return;
 
-        if (currentlyDegraded)
+        if (!_degradedState.TryAdd(destinationId, true))
         {
-            _logger.LogWarning("Backend {DestinationId} DEGRADED — P95: {P95:F0}ms (threshold: {Threshold:F0}ms). Priority demoted.",
-                destinationId, p95, _thresholdMs);
-            SendSlackNotification(destinationId, p95, degraded: true);
+            // Another thread already transitioned this backend
+            _degradedState.TryUpdate(destinationId, true, false);
+            return;
         }
-        else
-        {
-            _logger.LogInformation("Backend {DestinationId} RECOVERED — P95: {P95:F0}ms (threshold: {Threshold:F0}ms). Priority restored.",
-                destinationId, p95, _thresholdMs);
-            SendSlackNotification(destinationId, p95, degraded: false);
-        }
+
+        var p95 = GetP95(destinationId);
+        _logger.LogWarning("Backend {DestinationId} DEGRADED — P95: {P95:F0}ms (threshold: {Threshold:F0}ms). Priority demoted. Restart required to restore.",
+            destinationId, p95, _thresholdMs);
+        SendSlackNotification(destinationId, p95);
     }
 
-    private void SendSlackNotification(string destinationId, double? p95, bool degraded)
+    private void SendSlackNotification(string destinationId, double? p95)
     {
         if (string.IsNullOrEmpty(_slackWebhookUrl))
             return;
 
-        var emoji = degraded ? ":rotating_light:" : ":white_check_mark:";
-        var status = degraded ? "DEGRADED" : "RECOVERED";
-        var color = degraded ? "#FF0000" : "#36A64F";
         var p95Text = p95.HasValue ? $"{p95.Value / 1000:F1}s" : "N/A";
 
         var payload = new
@@ -102,16 +97,16 @@ public class LatencyTracker
             {
                 new
                 {
-                    color,
+                    color = "#FF0000",
                     blocks = new object[]
                     {
-                        new { type = "section", text = new { type = "mrkdwn", text = $"{emoji} *OpenAI LB — Backend {status}*" } },
+                        new { type = "section", text = new { type = "mrkdwn", text = $":rotating_light: *OpenAI LB — Backend DEGRADED*" } },
                         new { type = "section", fields = new[]
                         {
                             new { type = "mrkdwn", text = $"*Backend:*\n`{destinationId}`" },
                             new { type = "mrkdwn", text = $"*P95 Latency:*\n{p95Text}" },
                             new { type = "mrkdwn", text = $"*Threshold:*\n{_thresholdMs / 1000:F1}s" },
-                            new { type = "mrkdwn", text = $"*Action:*\n{(degraded ? "Priority demoted (+100)" : "Priority restored")}" },
+                            new { type = "mrkdwn", text = $"*Action:*\nPriority demoted (+100). Restart required to restore." },
                         }},
                     }
                 }
