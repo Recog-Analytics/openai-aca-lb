@@ -33,6 +33,8 @@ public class LatencyConfig
             throw new ArgumentException("LATENCY_MIN_SAMPLES must be >= 1");
         if (config.ThresholdMs <= 0)
             throw new ArgumentException("LATENCY_THRESHOLD_MS must be > 0");
+        if (config.MinSamples > config.WindowSize)
+            throw new ArgumentException($"LATENCY_MIN_SAMPLES ({config.MinSamples}) must be <= LATENCY_WINDOW_SIZE ({config.WindowSize})");
 
         return config;
     }

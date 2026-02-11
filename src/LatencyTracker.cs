@@ -54,6 +54,9 @@ public class LatencyTracker
 
     public bool IsDegraded(string destinationId, double thresholdMs)
     {
+        if (_degradedState.TryGetValue(destinationId, out var degraded) && degraded)
+            return true;
+
         var p95 = GetP95(destinationId);
         if (p95 == null)
             return false;
