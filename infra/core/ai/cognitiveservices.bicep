@@ -36,13 +36,10 @@ resource deployment 'Microsoft.CognitiveServices/accounts/deployments@2023-05-01
   name: deployment.name
   properties: {
     model: deployment.model
-    raiPolicyName: contains(deployment, 'raiPolicyName') ? deployment.raiPolicyName : null
+    raiPolicyName: deployment.?raiPolicyName
   }
-  sku: contains(deployment, 'sku') ? deployment.sku : {
+  sku: deployment.?sku ?? {
     name: 'Standard'
     capacity: deploymentCapacity
   }
 }]
-
-output openAiName string = account.name
-output openAiEndpointUri string = account.properties.endpoint

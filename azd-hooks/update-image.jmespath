@@ -1,0 +1,17 @@
+{
+  properties: {
+    configuration: {
+      ingress: merge(properties.configuration.ingress, {targetPort: `8080`})
+    },
+    template: merge(properties.template, {
+      revisionSuffix: null,
+      containers: map(&(name == 'main' && merge(@, {
+        image: '__IMAGE__',
+        probes: [
+          {type: 'Liveness', httpGet: {path: '/healthz', port: `8080`, scheme: 'HTTP'}, periodSeconds: `30`},
+          {type: 'Readiness', httpGet: {path: '/readyz', port: `8080`, scheme: 'HTTP'}, periodSeconds: `10`}
+        ]
+      }) || @), properties.template.containers)
+    })
+  }
+}

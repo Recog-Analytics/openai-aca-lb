@@ -8,50 +8,53 @@ param containerRegistryName string
 param identityName string
 param identityClientId string
 param logAnalyticsWorkspaceName string
+param discoveryScopes array
+param keyVaultUri string
+param callersFileSecretName string
+param overridesFileSecretName string
+param slackWebhookSecretName string = ''
+param imageName string = ''
 
-@minLength(1)
-@description('The URL of your first Azure OpenAI endpoint in the following format: https://[name].openai.azure.com')
-param backend_1_url string
+var configurationPath = '/mnt/lb-config'
+var discoveryEnvironment = [for (discoveryScope, index) in discoveryScopes: {
+  name: 'Discovery__Scopes__${index}'
+  value: discoveryScope
+}]
+var configurationSecrets = [
+  {
+    name: 'lb-callers'
+    keyVaultUrl: '${keyVaultUri}secrets/${callersFileSecretName}'
+    identity: userIdentity.id
+  }
+  {
+    name: 'lb-overrides'
+    keyVaultUrl: '${keyVaultUri}secrets/${overridesFileSecretName}'
+    identity: userIdentity.id
+  }
+]
+var slackSecrets = empty(slackWebhookSecretName) ? [] : [
+  {
+    name: 'lb-slack-webhook'
+    keyVaultUrl: '${keyVaultUri}secrets/${slackWebhookSecretName}'
+    identity: userIdentity.id
+  }
+]
+var slackEnvironment = empty(slackWebhookSecretName) ? [] : [
+  {
+    name: 'Operations__SlackWebhookUrl'
+    secretRef: 'lb-slack-webhook'
+  }
+]
 
-@description('The priority of your first OpenAI endpoint (lower number means higher priority)')
-param backend_1_priority int
+module containerRegistry 'core/host/container-registry.bicep' = {
+  name: containerRegistryName
+  params: {
+    name: containerRegistryName
+    location: location
+    tags: tags
+  }
+}
 
-@minLength(1)
-@description('The URL of your second Azure OpenAI endpoint in the following format: https://[name].openai.azure.com')
-param backend_2_url string
-
-@description('The priority of your second OpenAI endpoint (lower number means higher priority)')
-param backend_2_priority int
-
-@minLength(1)
-@description('The URL of your second Azure OpenAI endpoint in the following format: https://[name].openai.azure.com')
-param backend_3_url string
-
-@description('The priority of your second OpenAI endpoint (lower number means higher priority)')
-param backend_3_priority int
-
-
-// module containerAppsEnvironment 'core/host/container-apps-environment.bicep' = {
-//   name: containerAppsEnvironmentName
-//   params: {
-//     name: containerAppsEnvironmentName
-//     location: location
-//     tags: tags
-//     logAnalyticsWorkspaceName: logAnalyticsWorkspaceName
-//     applicationInsightsName: applicationInsightsName
-//   }
-// }
-
- module containerRegistry 'core/host/container-registry.bicep' = {
-   name: containerRegistryName
-   params: {
-     name: containerRegistryName
-     location: location
-     tags: tags
-   }
- }
-
-// Container apps host (including container registry)
 module containerApps 'core/host/container-apps.bicep' = {
   name: 'container-apps'
   params: {
@@ -61,9 +64,7 @@ module containerApps 'core/host/container-apps.bicep' = {
     containerRegistryName: containerRegistryName
     logAnalyticsWorkspaceName: logAnalyticsWorkspaceName
   }
-  dependsOn: [
-    containerRegistry
-  ]
+  dependsOn: [containerRegistry]
 }
 
 module app 'core/host/container-app.bicep' = {
@@ -82,11 +83,52 @@ module app 'core/host/container-app.bicep' = {
     containerMinReplicas: 1
     containerMaxReplicas: 10
     external: true
-    env: [
+    imageName: imageName
+    targetPort: empty(imageName) ? 80 : 8080
+    secrets: concat(configurationSecrets, slackSecrets)
+    volumes: [
       {
-        name: 'RUNNING_IN_PRODUCTION'
-        value: 'true'
+        name: 'lb-config'
+        storageType: 'Secret'
+        secrets: [
+          {
+            secretRef: 'lb-callers'
+            path: 'callers.yaml'
+          }
+          {
+            secretRef: 'lb-overrides'
+            path: 'overrides.yaml'
+          }
+        ]
       }
+    ]
+    volumeMounts: [
+      {
+        volumeName: 'lb-config'
+        mountPath: configurationPath
+      }
+    ]
+    probes: empty(imageName) ? [] : [
+      {
+        type: 'Liveness'
+        httpGet: {
+          path: '/healthz'
+          port: 8080
+          scheme: 'HTTP'
+        }
+        periodSeconds: 30
+      }
+      {
+        type: 'Readiness'
+        httpGet: {
+          path: '/readyz'
+          port: 8080
+          scheme: 'HTTP'
+        }
+        periodSeconds: 10
+      }
+    ]
+    env: concat([
       {
         name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
         value: applicationInsights.properties.ConnectionString
@@ -96,31 +138,14 @@ module app 'core/host/container-app.bicep' = {
         value: identityClientId
       }
       {
-        name: 'BACKEND_1_URL'
-        value: backend_1_url
-        // Continue with the rest of the environment variables
+        name: 'Discovery__CallersFilePath'
+        value: '${configurationPath}/callers.yaml'
       }
       {
-        name: 'BACKEND_1_PRIORITY'
-        value: string(backend_1_priority)
+        name: 'Discovery__OverridesFilePath'
+        value: '${configurationPath}/overrides.yaml'
       }
-      {
-        name: 'BACKEND_2_URL'
-        value: backend_2_url
-      }
-      {
-        name: 'BACKEND_2_PRIORITY'
-        value: string(backend_2_priority)
-      }
-      {
-        name: 'BACKEND_3_URL'
-        value: backend_3_url
-      }
-      {
-        name: 'BACKEND_3_PRIORITY'
-        value: string(backend_3_priority)
-      }
-    ]
+    ], discoveryEnvironment, slackEnvironment)
   }
   dependsOn: [
     containerApps
@@ -132,7 +157,10 @@ resource applicationInsights 'Microsoft.Insights/components@2020-02-02' existing
   name: applicationInsightsName
 }
 
+resource userIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = {
+  name: identityName
+}
+
 output SERVICE_WEB_NAME string = app.outputs.name
-output SERVICE_WEB_URI string = app.outputs.uri
 output AZURE_REGISTRY_NAME string = containerRegistry.outputs.name
 output uri string = app.outputs.uri
