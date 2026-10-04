@@ -1,5 +1,6 @@
-using Yarp.ReverseProxy.Health;
-using Yarp.ReverseProxy.Transforms;
+using openai_loadbalancer.Discovery;
+using openai_loadbalancer.Pipeline;
+using openai_loadbalancer.Operations;
 
 namespace openai_loadbalancer;
 
@@ -8,28 +9,17 @@ public class Program
     public static void Main(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
+        builder.Services.AddOperations(builder.Configuration);
+        builder.Services.AddDiscovery(builder.Configuration);
 
-        var backendConfiguration = BackendConfig.LoadConfig(builder.Configuration);
-        var latencyConfig = LatencyConfig.LoadFromEnvironment();
-        var yarpConfiguration = new YarpConfiguration(backendConfiguration);
-        builder.Services.AddSingleton<IPassiveHealthCheckPolicy, ThrottlingHealthPolicy>();
-        builder.Services.AddReverseProxy().AddTransforms(m =>
-        {
-            m.AddRequestTransform(yarpConfiguration.TransformRequest());
-            m.AddResponseTransform(yarpConfiguration.TransformResponse());
-        }).LoadFromMemory(yarpConfiguration.GetRoutes(), yarpConfiguration.GetClusters());
-
+        builder.Services.AddRequestPipeline(builder.Configuration);
         builder.Services.AddHealthChecks();
 
         var app = builder.Build();
-        var latencyTracker = new LatencyTracker(latencyConfig, app.Services.GetRequiredService<ILoggerFactory>());
-
         app.MapHealthChecks("/healthz");
-        app.MapReverseProxy(m =>
-        {
-            m.UseMiddleware<RetryMiddleware>(backendConfiguration, latencyTracker, latencyConfig);
-            m.UsePassiveHealthChecks();
-        });
+        app.MapDiscoveryReadiness();
+        app.MapAdminState();
+        app.MapRequestPipeline();
 
         app.Run();
     }
