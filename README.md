@@ -1,233 +1,410 @@
-![Smart load balancing](./images/intro-loadbalance.png)
+# Azure OpenAI load balancer
 
-# :rocket: Smart load balancing for OpenAI endpoints
+A .NET 10 proxy built with YARP. It discovers Azure OpenAI deployments and routes requests by model, quota, health, and data residency.
 
-Many service providers, including OpenAI, usually set limits on the number of calls that can be made. In the case of Azure OpenAI, there are token limits (TPM or tokens per minute) and limits on the number of requests per minute (RPM). When a server starts running out of resources or the service limits are exhausted, the provider may issue a 429 or TooManyRequests HTTP Status code, and also a Retry-After response header indicating how much time you should wait until you try the next request.
+Clients use one endpoint and a proxy-issued API key. The proxy authenticates to Azure OpenAI with its managed identity.
+It never forwards client credentials or falls back to a different model.
+See [the design](docs/design/load-balancing.md) for the specification and [CHANGELOG](CHANGELOG.md) for changes.
 
-The solution presented here is part of comprehensive one that takes into consideration things like a good UX/workflow design, adding application resiliency and fault-handling logic, considering service limits, choosing the right model for the job, the API policies, setting up logging and monitoring among other considerations. This solution seamlessly expose a single endpoint to your applications while keeping an efficient logic to consume two or more OpenAI or any API backends based on availability and priority.
+## Runtime configuration
 
-It is built using the high-performance [YARP C# reverse-proxy](https://github.com/microsoft/reverse-proxy) framework from Microsoft. However, you don't need to understand C# to use it, you can just build the provided Docker image. 
-This is an alternative solution to the [API Management OpenAI smart load balancer](https://github.com/Azure-Samples/openai-apim-lb/), with the same logic.
+Configure discovery through appsettings or environment variables:
 
-## :sparkles: Why do you call this "smart" and different from round-robin load balancers?
-
-One of the key components of handling OpenAI throttling is to be aware of the HTTP status code error 429 (Too Many Requests). There are [Tokens-Per-Minute and a Requests-Per-Minute](https://learn.microsoft.com/en-us/azure/ai-services/openai/how-to/quota?tabs=rest#understanding-rate-limits) rate limiting in Azure OpenAI. Both situations will return the same error code 429.
-
-Together with that HTTP status code 429, Azure OpenAI will also return a HTTP response header called "Retry-After", which is the number of seconds that instance will be unavailable before it starts accepting requests again.
-
-These errors are normally handled in the client-side by SDKs. This works great if you have a single API endpoint. However, for multiple OpenAI endpoints (used for fallback) you would need to manage the list of URLs in the client-side too, which is not ideal.
-
-What makes this solution different than others is that it is aware of the "Retry-After" and 429 errors and intelligently sends traffic to other OpenAI backends that are not currently throttling. You can even have a priority order in your backends, so the highest priority are the ones being consumed first while they are not throttling. When throttling kicks in, it will fallback to lower priority backends while your highest ones are waiting to recover. 
-
-Another important feature: there is no time interval between attempts to call different backends. Many of other OpenAI load balancers out there configure a waiting internal (often exponential). While this is a good idea doing at the client side, making a server-side load balancer to wait is not a good practice because you hold your client and consume more server and network capacity during this waiting time. Retries on the server-side should be immediate and to a different endpoint.
-
-Check this diagram for easier understanding:
-
-![normal!](/images/apim-loadbalancing-active.png "Normal scenario")
-
-![throttling!](/images/apim-loadbalancing-throttling.png "Throttling scenario")
-
-## :1234: Priorities
-
-One thing that stands out in the above images is the concept of "priority groups". Why do we have that? That's because you might want to consume all your available quota in specific instances before falling back to others. For example, in this scenario:
-- You have a [PTU (Provisioned Throughput)](https://learn.microsoft.com/en-us/azure/ai-services/openai/concepts/provisioned-throughput) deployment. You want to consume all its capacity first because you are paying for this either you use it or not. You can set this instance(s) as **Priority 1**
-- Then you have extra deployments using the default S0 tier (token-based consumption model) spread in different Azure regions which you would like to fallback in case your PTU instance is fully occupied and returning errors 429. Here you don't have a fixed pricing model like in PTU but you will consume these endpoints only during the period that PTU is not available. You can set these as **Priority 2**
-
-Another scenario:
-- You don't have any PTU (provisioned) deployment but you would like to have many S0 (token-based consumption model) spread in different Azure regions in case you hit throttling. Let's assume your applications are mostly in USA.
-- You then deploy one instance of OpenAI in each region of USA that has OpenAI capacity. You can set these instance(s) as **Priority 1**
-- However, if all USA instances are getting throttled, you have another set of endpoints in Canada, which is closest region outside of USA. You can set these instance(s) as **Priority 2**
-- Even if Canada also gets throttling at the same at as your USA instances, you can fallback to European regions now. You can set these instance(s) as **Priority 3**
-- In the last case if all other previous endpoints are still throttling during the same time, you might even consider having OpenAI endpoints in Asia as "last resort". Latency will be little bit higher but still acceptable. You can set these instance(s) as **Priority 4**
-
-And what happens if I have multiple backends with the same priority? Let's assume I have 3 OpenAI backends in USA with all Priority = 1 and all of them are not throttling? In this case, the algorithm will randomly pick among these 3 URLs.
-
-## :gear: Getting started
-
-The source code provides a Dockerfile, which means you are free to build and deploy to your own service, as long as it supports container images.
-
-### [Option 1 - Recommended] Deploy using Azure Developer CLI
-Deploying this solution using the [Azure Developer CLI](https://learn.microsoft.com/en-us/azure/developer/azure-developer-cli/install-azd) is super simple. All you need to do is clone this repo and run the following command, locally (given you [installed](https://learn.microsoft.com/en-us/azure/developer/azure-developer-cli/install-azd) the Azure Developer CLI) and [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli):
-
-`
-azd up
-`
-
-> [!NOTE]  
-> If you are using GitHub Codespaces, you need login to AZD and AZ CLI before running *azd up*:
-> ```
-> az login --use-device-code
-> azd auth login --use-device-code
-> azd up
-> ```
-
-
-Your deployment will create a Azure Container Apps with three GPT 3.5 Turbo backends to load balance to. If you want to add more, you can just edit your Container Apps environment variables.
-Each of the OpenAI instances will be deployed with 30K TPM (tokens per minute) capacity by default. If you are getting deployment capacity errors, you might want to lower than value. Or, if you are planning to deploy higher capacity, you can set the following AZD variable before deploying:
-
-`
-azd env set OPENAI_CAPACITY 50
-`
-
-This command will deploy the three backends with 50K TPM each. Be aware of [regional quotas and limits](https://learn.microsoft.com/en-us/azure/ai-services/openai/quotas-limits)
-
-When you are done testing, you can tear down all resources by running
-
-`
-azd down
-`
-
-### [Option 2] Deploy the service directly to an Azure Container Apps
-
-If you are not comfortable working with container images or cloning this repo and you would like a very easy way to test this load balancer in Azure, you can deploy quickly to [Azure Container Apps](https://azure.microsoft.com/products/container-apps):
-
-[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2FAzure-Samples%2Fopenai-aca-lb%2Fmain%2Fazuredeploy.json)
-
-- Clicking the Deploy button above, you will be taken to an Azure page with the required parameters. You need to fill the parameters beginning with "Backend_X_" (see below in [Configuring the OpenAI endpoints](#Configuring-the-OpenAI-endpoints) for more information on what they do)
-- After the deployment is finished, go to your newly created Container Apps service and from the Overview menu, get the Application Url of your app. The format will be "https://app-[something].[region].azurecontainerapps.io". This is the URL you will call from your client applications
-
-
-### [Option 3] Build and deploy as a Docker image
-
-If you want to clone this repository and build your own image instead of using the pre-built public image:
-
-```
-cd src
-docker build -t aoai-smart-loadbalancing:v1 .
+```json
+{
+  "Discovery": {
+    "Scopes": [
+      "11111111-1111-1111-1111-111111111111",
+      "/subscriptions/22222222-2222-2222-2222-222222222222/resourceGroups/openai"
+    ],
+    "OverridesFilePath": "/mnt/config/overrides.yaml",
+    "CallersFilePath": "/mnt/config/callers.yaml"
+  }
+}
 ```
 
-This will use the Dockerfile which will build the source code inside the container itself (no need to have .NET build tools in your host machine) and then it will copy the build output to a new runtime image for ASP.NET 8. Just make sure your Docker version supports [multi-stage](https://docs.docker.com/build/building/multi-stage/) builds. The final image will have around 87 MB.
+| Environment variable | Purpose |
+| --- | --- |
+| `Discovery__Scopes__0`, `Discovery__Scopes__1`, … | Subscription GUIDs, subscription ARM IDs, or resource-group ARM IDs. |
+| `Discovery__OverridesFilePath` | Path to the routing override YAML file. |
+| `Discovery__CallersFilePath` | Path to the caller YAML file. |
+| `AZURE_CLIENT_ID` | User-assigned managed identity client ID. Omit for a system-assigned identity. |
+| `APPLICATIONINSIGHTS_CONNECTION_STRING` | Azure Monitor export destination. |
+| `Operations__SlackWebhookUrl` | Optional HTTPS Slack webhook. An empty value disables alerts. |
 
-### [Option 4] Deploy the pre-built image from Docker hub
+Supply at least one scope and both file paths. Relative paths resolve against the application content root.
+Both files must exist. Empty files are valid; an empty callers file grants no access.
+Scopes and file paths are startup settings. File contents reload at startup and every five minutes.
 
-If you don't want to build the container from the source code, you can pull it from the public Docker registry:
+Discovery reads `OpenAI` and `AIServices` accounts through the public Azure management endpoint.
+It keeps successful deployments with supported SKUs and deduplicates overlapping scopes.
+The managed identity needs Reader on discovery scopes and access to subscription location metadata.
+It also needs Cognitive Services OpenAI User on every backend account.
+Backend tokens use `https://cognitiveservices.azure.com/.default` and remain cached until two minutes before expiry.
 
-`
-docker pull andredewes/aoai-smart-loadbalancing:v1
-`
+Each successful refresh publishes the routing table and caller configuration together.
+ARM, file, and validation failures retain the last successful snapshot and log an error.
+Deployment additions, removals, capacity changes, and weight changes produce logs.
+Unknown geography excludes a deployment with a warning, including global deployments.
+A region override can supply the zone. Global SKUs always keep the `global` zone.
+Azure public cloud is the supported environment.
 
-### Configuring the OpenAI endpoints
+## Caller keys and data residency
 
-After you deployed your container service using one of the methods above, it is time to adjust your OpenAI backends configuration using environment variables.
-This is the expected format you must provide:
+Callers authenticate with `api-key: <key>` or `Authorization: Bearer <key>`.
+The key contains `lbk_` followed by 32 random bytes encoded as base64url, without padding.
+Missing, unknown, or malformed credentials return 401.
+Identical credentials in both headers are accepted; conflicting credentials are rejected.
+The proxy strips both headers before backend forwarding.
 
-| Environment variable name | Mandatory | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Example                               |
-|---------------------------|-----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------|
-| BACKEND_X_URL             | Yes       | The full Azure OpenAI URL. Replace "_X_" with the number of your backend. For example, "BACKEND_1_URL" or "BACKEND_2_URL"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | https://andre-openai.openai.azure.com |
-| BACKEND_X_PRIORITY        | Yes       | The priority of your OpenAI endpoint. Lower numbers means higher priority. Replace "_X_" with the number of your backend. For example, "BACKEND_1_PRIORITY" or "BACKEND_2_PRIORITY"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | 1                                     |
-| BACKEND_X_APIKEY          | No       | The API key of your OpenAI endpoint. Replace "_X_" with the number of your backend. For example, "BACKEND_1_APIKEY" or "BACKEND_2_APIKEY". If this setting is not set, it will attempt to use your environment credentials, including Managed Identities in case you are running Azure workloads. For more details, check [DefaultAzureCredential](https://learn.microsoft.com/dotnet/api/overview/azure/identity-readme?view=azure-dotnet#defaultazurecredential)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | 761c427c520d40c991299c66d10c6e40      |
-| BACKEND_X_DEPLOYMENT_NAME | No        | If this setting is set, the incoming client URL will have the deployment name overridden. For example, an incoming HTTP request is:<br><br>https://andre-openai-eastus.openai.azure.com/openai/deployments/gpt35turbo/chat/completions?api-version=2023-07-01-preview <br><br>The **gpt35turbo** will be replaced by this setting when the request goes to your backend. In this way, you don't need to have all the deployment names as the same across your endpoints. You can even mix different GPT models (like GPT35 and GPT4), even though this is not recommended. <br><br>If nothing is set, the incoming URL coming from your client applications will be kept the same when sending to the backend, it will not be overridden. That means your deployment names must be the same in your OpenAI endpoints. | your-openai-deployment-name           |
+Generate a key and its hash with Python:
 
-For example, let's say you would like to configure the load balancer to have a main endpoint (we call it here BACKEND_1). We set it with the highest priority 1. And then we have two more endpoints as fallback in case the main one is throttling... we define then BACKEND_2 and BACKEND_3 with the same priority of 2:
+```sh
+python3 - <<'PY'
+import hashlib
+import secrets
 
+key = "lbk_" + secrets.token_urlsafe(32)
+print("Caller key:", key)
+print("Configuration hash: sha256:" + hashlib.sha256(key.encode()).hexdigest())
+PY
+```
 
-| Environment variable name | Value                                   |
-|---------------------------|-----------------------------------------|
-| BACKEND_1_URL             | https://andre-openai.openai.azure.com   |
-| BACKEND_1_PRIORITY        | 1                                       |
-| BACKEND_1_APIKEY          | 33b9996ce4644bc0893c7988bae349af        |
-| BACKEND_2_URL             | https://andre-openai-2.openai.azure.com |
-| BACKEND_2_PRIORITY        | 2                                       |
-| BACKEND_2_APIKEY          | 412ceac74dde451e9ac12581ca50b5c5        |
-| BACKEND_3_URL             | https://andre-openai-3.openai.azure.com |
-| BACKEND_3_PRIORITY        | 2                                       |
-| BACKEND_3_APIKEY          | 326ec768694d4d469eda2fe2c582ef8b        |
+Give the key to the caller through your secret delivery process. Store only its hash in the callers file:
 
+```yaml
+callers:
+  - name: orchestrator
+    zones: [eu, global]
+    keyHashes:
+      - "sha256:REPLACE_WITH_64_HEXADECIMAL_DIGITS"
+```
 
-### Load balancer settings
+Replace the example hash before deployment. Caller names and key hashes must be unique.
+Each caller requires at least one zone and one hash. Hash comparison runs in constant time.
+Telemetry identifies the caller by name and never records the key or hash.
 
-This is the list of environment variables that are used to configure the load balancer in global scope, not only for specific backend endpoints:
+The first zone is the default. `x-lb-data-zone` selects another zone allowed for that caller.
+A zone outside that list returns 403. `global` allows deployments from every zone.
+Other zones allow only deployments with a matching zone, regardless of tier.
 
-| Environment variable name | Mandatory | Description                                                                                                                                                                                                                                         | Example |
-|---------------------------|-----------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
-| HTTP_TIMEOUT_SECONDS      | No        | If set, it will change the default 100 seconds timeout when waiting for OpenAI responses to something else.<br>If a timeout is reached, the endpoint it will be marked unhealthy for 10 seconds and the request will fallback to another backend. | 120     |
+Rotate a key in this order:
 
-### Testing the solution
+1. Add the new hash to the caller configuration.
+2. Wait for the updated file to reach each replica and refresh successfully.
+3. Update the caller to use the new key.
+4. Remove the old hash and wait for another successful refresh.
 
-To test if everything works by running some code of your choice, e.g., this code with OpenAI Python SDK:
+## Routing overrides
+
+Use the override file for version defaults, exclusions, manual drains, weight adjustments, and region corrections:
+
+```yaml
+defaultVersions:
+  gpt-4o: "2024-11-20"
+exclude:
+  - account: oai-legacy-westeurope
+  - account: oai-swedencentral
+    deployment: gpt4o-test
+deployments:
+  - account: oai-francecentral
+    deployment: gpt4o
+    tier: 1
+    weightMultiplier: 0.5
+    disabled: true
+regions:
+  switzerlandnorth: { zone: eu }
+modelHealth:
+  gpt-4o@2024-11-20:
+    degradedFloorSeconds: 2
+    degradedThresholdSeconds: 6
+```
+
+Account and deployment selectors use Azure resource names, with case-insensitive matching.
+Exclusions remove deployments from the table. `disabled: true` retains a deployment but stops traffic.
+Exclusions take precedence over deployment overrides. Zero weight receives no traffic.
+An override cannot include batch, unknown, or unsuccessful deployments.
+Region names are case-insensitive. Model names and versions are case-sensitive.
+Unknown properties, duplicate YAML keys, duplicate deployment overrides, and invalid values fail the refresh.
+
+`degradedFloorSeconds` defaults to 2. The optional `degradedThresholdSeconds` applies when no peer has enough TTFB samples.
+Both settings require finite, positive seconds. `modelHealth` keys must include a version.
+
+## Client requests
+
+Address models by their model name, optionally followed by `@version`:
+
+- Azure API: `/openai/deployments/gpt-4o@2024-11-20/chat/completions?api-version=...`.
+- OpenAI v1 API: `/openai/v1/chat/completions` or `/v1/chat/completions`, with `"model": "gpt-4o@2024-11-20"`.
+
+An unversioned model uses the configured default, or the only discovered version.
+An unknown model, unavailable default, or ambiguous version returns 400 with available versions.
+The proxy rewrites the deployment path segment or top-level v1 `model` field to the selected Azure deployment name.
+It normalizes `/v1/...` to `/openai/v1/...`.
+Duplicate top-level v1 fields, decoded dot segments, and backslashes are rejected.
+Other body fields retain their meaning. Operation suffixes are preserved without a second decode.
+
+Use a proxy key with the OpenAI Python SDK:
+
 ```python
-from openai import AzureOpenAI
+import os
+from openai import OpenAI
 
-client = AzureOpenAI(
-    azure_endpoint="https://<your_load_balancer_url>",  #if you deployed to Azure Container Apps, it will be 'https://app-[something].[region].azurecontainerapps.io'
-    api_key="does-not-matter", #The api-key sent by the client SDKs will be overriden by the ones configured in the backend environment variables
-    api_version="2023-12-01-preview"
+client = OpenAI(
+    base_url=os.environ["LOAD_BALANCER_URL"].rstrip("/") + "/openai/v1",
+    api_key=os.environ["LOAD_BALANCER_KEY"],
 )
-
 response = client.chat.completions.create(
-    model="<your_openai_deployment_name>",
-    messages=[
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "What is the first letter of the alphabet?"}
-    ]
+    model="gpt-4o@2024-11-20",
+    messages=[{"role": "user", "content": "What is the first letter of the alphabet?"}],
 )
-print(response)
+print(response.choices[0].message.content)
 ```
 
-### Scalability vs Reliability
-This solution addresses both scalability and reliability concerns by allowing your total Azure OpenAI quotas to increase and providing server-side failovers transparently for your applications. However, if you are looking purely for a way to increase default quotas, I still would recommend that you follow the official guidance to [request a quota increase](https://learn.microsoft.com/azure/ai-services/openai/quotas-limits#how-to-request-increases-to-the-default-quotas-and-limits).
+Azure SDK clients can use the proxy URL as `azure_endpoint` and the proxy key as `api_key`.
+Use the requested model name rather than a backend deployment name.
+Responses include `x-lb-deployment`, `x-lb-region`, and `x-lb-attempts` for the selected backend and attempt count.
 
-### Multiple load balancer instances
-This solution uses the local memory to store the endpoints health state. That means each instance will have its own view of the throttling state of each OpenAI endpoint. What might happen during runtime is this:
-- Instance 1 receives a customer request and gets a 429 error from backend 1. It marks that backend as unavailable for X seconds and then reroute that customer request to next backend
-- Instance 2 receives a customer request and sends that request again to backend 1 (since its local cached list of backends didn't have the information from instance 1 when it marked as throttled). Backend 1 will respond with error 429 again and instance 2 will also mark it as unavailable and reroutes the request to next backend
+The proxy buffers request bodies up to 16 MiB for retries. Larger bodies return 413.
+Azure-style request bodies are preserved verbatim. SSE responses stream as chunks arrive without response buffering.
+Backend redirects pass through; the proxy does not follow them.
 
-So, it might occur that internally, different instances will try route to throttled backends and will need to retry to another backend. Eventually, all instances will be in sync again at a small cost of unnecessary roundtrips to throttled endpoints.
-I honestly think this is a very small price to pay, but if you want to solve that you can always change the source code to use an external shared cache such as Redis, so all instances will share the same cached object.
+### Selection and retries
 
-Having this in mind, be careful when you configure your hosting container service when it comes to scalability. For instance, the default scaling rules in a Azure Container Apps is the number of concurrent HTTP requests: if it is higher than 10, it will create another container instance. This effect is undesirable for the load balancer as it will create many instances, and that's why the Quick Deploy button in this repo changes that default behavior to only scale the container when CPU usage is higher than 50%. 
+| Tier | SKUs | Zone |
+| --- | --- | --- |
+| 0 | `ProvisionedManaged`, `DataZoneProvisionedManaged`, `GlobalProvisionedManaged` | Region geography, or `global` for global SKUs. |
+| 1 | `Standard`, `DataZoneStandard` | Region geography. |
+| 2 | `GlobalStandard` | `global`. |
 
-### Logging
-The default logging features coming from [YARP](https://microsoft.github.io/reverse-proxy/articles/diagnosing-yarp-issues.html) are not changed here, it is still applicable. For example, you should see these log lines being print in the container console (Stdout) when requests are sucesfully redirected to the backends:
+Batch and unknown SKUs are excluded. Azure geography `Europe` maps to `eu`; `US` and `United States` map to `us`.
+Other geography names use lowercase with spaces replaced by hyphens.
+Healthy tier 0 deployments receive traffic first, then tier 1, then tier 2.
+Selection uses capacity-weighted random choice within a tier. Weights never compare across tiers.
+Degraded deployments rank after all healthy tiers. Five percent of initial attempts probe degraded deployments when available.
+Disabled, open, throttled, and previously tried deployments are excluded.
 
+Each request permits at most three attempts, with a different deployment on each attempt.
+The proxy retries connect/DNS/TLS errors, 429, 500, 502, 503, and timeouts before response headers.
+Other 4xx responses pass through without a retry.
+A backend 401, 403, or 404 `DeploymentNotFound` disables that deployment until the next successful refresh.
+Ordinary 404 responses pass through. The proxy inspects only a bounded JSON prefix for `DeploymentNotFound`.
+Client disconnects abort processing without a health failure. Response body failures count as failures but never trigger retries.
+Backend token acquisition failures return 503 without changing deployment health.
+
+The replica retry budget uses a trailing ten-second window: `max(100, authenticatedRequests / 5)`, rounded down.
+The floor represents ten retries per second across the window, without a separate one-second limiter.
+Retries and unauthenticated requests do not increase the original request count.
+When the budget is exhausted, the proxy returns the current backend error.
+
+When only eligible untried throttled deployments remain, the proxy waits once if the shortest delay fits the deadline.
+Otherwise it returns 429 with the shortest `Retry-After`. With no available or throttled candidate, it returns 503.
+Clients should still handle terminal errors and rate limits.
+
+### Deadlines
+
+| Setting | Default |
+| --- | --- |
+| `RequestPipeline__OverallTimeout` | `00:02:00` |
+| `RequestPipeline__NonStreamingTtfbTimeout` | `00:00:30` |
+| `RequestPipeline__StreamingTtfbTimeout` | `00:00:15` |
+
+These settings use .NET TimeSpan values. All must be positive; the overall timeout cannot exceed 120 seconds.
+A positive integer `x-lb-timeout-ms` can shorten the overall deadline. Invalid values return 400.
+The overall deadline covers body buffering, token acquisition, retries, waits, and receipt of final backend response headers.
+TTFB measures request sent through response headers. Timers stop when backend headers arrive.
+Retries use only the time remaining before the original deadline.
+Streams and ordinary error bodies have no total-duration timeout. A response body failure never retries after headers.
+
+## Health and recovery
+
+Health is in memory per replica and resets on process restart. It is not shared across replicas.
+Retained deployment and account ARM IDs preserve health across refreshes, with case-insensitive comparison.
+Removed deployments lose health. Accounts lose their circuit when no deployments remain.
+Failed refreshes retain health. A removed and rediscovered deployment starts fresh.
+
+| State | Routing effect | Recovery |
+| --- | --- | --- |
+| Healthy | Normal selection. | — |
+| Throttled | Skipped. | Cooldown expires. |
+| Degraded | Last choice, with 5% probe traffic. | TTFB remains below the recovery threshold for ten minutes. |
+| Open | Skipped until one half-open probe is allowed. | A successful probe closes the circuit. |
+| Disabled | Skipped. | Override removal, or successful refresh for backend misconfiguration. |
+
+429 never counts as a circuit failure.
+Throttle delay uses `retry-after-ms`, then `retry-after` seconds or HTTP date, then ten seconds.
+The delay is clamped to 1–120 seconds. Concurrent responses retain the latest cooldown expiry.
+Deployment circuits use a thirty-second sliding window.
+They open after three consecutive failures, or at least five failures with a failure rate above 50%.
+They allow one half-open probe after thirty seconds. Failed probes double the delay up to five minutes.
+A successful probe resets the delay. Ignored outcomes release probes without changing the circuit.
+
+Connect, DNS, or TLS errors open the whole account immediately.
+An account also opens when more than half its deployment circuits are open.
+Account recovery leaves individual deployment circuits to recover through their own probes.
+Unchanged discovery refreshes retain recovered account circuits; membership changes recheck the majority condition.
+
+The degradation detector uses nearest-rank TTFB p95 over five minutes, with at least twenty samples.
+Peers use the same model name and version, and need twenty samples each.
+Degradation requires p95 above twice the peer median and above the absolute floor.
+Recovery requires ten minutes below 1.5 times the peer median.
+Without qualified peers, the optional absolute threshold controls degradation; recovery uses 75% of that threshold.
+Missing samples or threshold crossings restart recovery. Threshold changes retain samples.
+Model changes clear latency samples and degradation, while preserving other health.
+Evaluation occurs during health activity and snapshot reads.
+
+## Operations
+
+### Health endpoints
+
+`GET /healthz` is anonymous and reports process liveness.
+`GET /readyz` is anonymous and returns 503 until discovery first succeeds, then 200.
+A successful empty table counts as ready. Later refresh failures retain readiness and the last successful snapshot.
+Missing discovery configuration keeps readiness at 503.
+
+`GET /admin/state` requires a valid caller key and returns routing and health for the responding replica.
+Use it to inspect discovered deployments and their current health.
+It does not expose caller keys or hashes. A request through a scaled Container App can reach any replica.
+The response includes `replica`, `refreshedAt`, and deployments with routing fields and health.
+Health includes state, account circuit status, attempt eligibility, throttle delay, and TTFB p95.
+Responses use `Cache-Control: no-store`. Invalid keys return 401; no discovery snapshot returns 503.
+
+### Metrics, logs, and alerts
+
+OpenTelemetry exports metrics and logs to Azure Monitor when `APPLICATIONINSIGHTS_CONNECTION_STRING` is set.
+Console logging remains available without an exporter destination.
+Metrics include request count and outcome, TTFB, retries, state transitions, and throttle time.
+Dimensions identify caller, model, deployment, region, and tier when available.
+State-transition logs include account/deployment context. Logs never include caller credentials or request bodies.
+
+The meter name is `openai_loadbalancer`:
+
+| Metric | Kind | Meaning |
+| --- | --- | --- |
+| `lb.requests` | Counter | Requests by caller, model, deployment, region, tier, and outcome. |
+| `lb.retries` | Counter | Backend retries. |
+| `lb.ttfb` | Histogram, seconds | Request sent through backend response headers. |
+| `lb.state_transitions` | Counter | Health changes, including previous/current state and misconfiguration. |
+| `lb.throttle_time` | Histogram, seconds | Parsed and clamped cooldown for each backend 429, including extensions. |
+
+`deployment` uses the full deployment ARM ID. Missing context uses `unknown`, `none`, or tier `-1`.
+Health transitions use caller `unknown` because health belongs to the replica rather than one caller.
+Throttle metrics carry the request's caller and measure assigned delay, rather than elapsed unique throttle time.
+Without an Application Insights connection string, custom metric instruments remain available locally and console logs continue.
+
+Slack alerts report Open, Degraded, backend misconfiguration, and recovery transitions.
+Alert delivery runs outside the request path. Failed alert delivery logs a warning.
+Configure `Operations__SlackWebhookUrl` through a secret reference, or use the Bicep `slackWebhookSecretName` parameter.
+
+### Common checks
+
+| Symptom | Check |
+| --- | --- |
+| `/readyz` returns 503 | Discovery scopes, file mounts, YAML validation, managed identity, and ARM Reader permissions. |
+| Requests return 401 | Proxy key shape, caller hash, and whether the latest caller file refreshed successfully. |
+| Requests return 400 | Model/version resolution, v1 body fields, and timeout header. |
+| Requests return 403 | Caller zones and `x-lb-data-zone`. |
+| Requests return 429 | Deployment throttle state, retry budget, and remaining deadline. |
+| Requests return 503 | Available deployments, circuits, disabled overrides, and backend token acquisition. |
+| Deployment becomes misconfigured | Cognitive Services OpenAI User assignment, backend deployment name, and backend authentication logs. |
+
+## Deploy to Azure Container Apps
+
+The Bicep deployment provisions Container Apps, a user-assigned identity, a container registry, monitoring, and sample OpenAI accounts.
+Prepare an existing RBAC-enabled Key Vault containing the two YAML documents as secret values.
+The deployment grants its identity Key Vault Secrets User on that vault.
+The deployment principal needs permission to create resources and assign roles in all configured scopes.
+
+Create valid local `callers.yaml` and `overrides.yaml` files using the formats above.
+Publish them to your vault without printing secret values:
+
+```sh
+az keyvault secret set --vault-name <vault-name> --name lb-callers --file callers.yaml --output none
+az keyvault secret set --vault-name <vault-name> --name lb-overrides --file overrides.yaml --output none
 ```
-info: Yarp.ReverseProxy.Forwarder.HttpForwarder[9]
-info: Proxying to https://andre-openai-eastus.openai.azure.com/openai/deployments/gpt35turbo/chat/completions?api-version=2023-07-01-preview HTTP/2 RequestVersionOrLower 
-info: Yarp.ReverseProxy.Forwarder.HttpForwarder[56]
-info: Received HTTP/2.0 response 200.
-info: Yarp.ReverseProxy.Forwarder.HttpForwarder[9]
-info: Proxying to https://andre-openai-eastus.openai.azure.com/openai/deployments/gpt35turbo/chat/completions?api-version=2023-07-01-preview HTTP/2 RequestVersionOrLower 
-info: Yarp.ReverseProxy.Forwarder.HttpForwarder[56]
-info: Received HTTP/2.0 response 200.
+
+Set the vault resource ID before provisioning with Azure Developer CLI:
+
+```sh
+az login
+azd auth login
+azd env set CONFIG_KEY_VAULT_RESOURCE_ID /subscriptions/<subscription-id>/resourceGroups/<vault-resource-group>/providers/Microsoft.KeyVault/vaults/<vault-name>
+azd up
 ```
 
-Now, these are example of logs generated when the load balancer receives a 429 error from the OpenAI backend:
+The initial deployment uses a placeholder container until the source image is ready.
+The post-provision hook builds the current source in Azure Container Registry.
+It then updates the Container App image and health probes together in one revision.
+The update switches ingress from placeholder port 80 to application port 8080.
+Use the `CONTAINER_APP_URL` deployment output as the client endpoint.
+The application revision uses `/readyz` for readiness and `/healthz` for liveness.
+The placeholder revision omits those application probes.
 
+| Bicep parameter | Default or purpose |
+| --- | --- |
+| `discoveryScopes` | Empty defaults to the generated resource group. Otherwise use supported subscription/resource-group scopes. |
+| `keyVaultResourceId` | Required ARM ID of the existing configuration vault. |
+| `callersFileSecretName` | `lb-callers`. |
+| `overridesFileSecretName` | `lb-overrides`. |
+| `slackWebhookSecretName` | Empty disables Slack; otherwise references a webhook secret in the same vault. |
+| `imageName` | Optional prebuilt application image. When supplied, Bicep configures the application health probes immediately. |
+
+Set nondefault scope and secret-name parameters through Bicep deployment parameters.
+For direct Bicep deployment, supply `imageName` with an accessible image built from the current source.
+With the default placeholder, run the post-provision hook to install the application image and probes.
+The supplied `infra/main.parameters.json` maps `CONFIG_KEY_VAULT_RESOURCE_ID` and uses the default secret names.
+It also accepts `OPENAI_CAPACITY` for sample deployment capacity.
+Select available model names, versions, regions, and capacity through the OpenAI provisioning parameters in `infra/main.bicep`.
+The historical model defaults may be unavailable in your regions; select supported versions before provisioning.
+Set `openAiInstances` to `{}` and provide existing `discoveryScopes` to omit sample account creation.
+
+Reader is assigned at each discovery scope's parent subscription to permit subscription location metadata reads.
+This grants subscription-wide read visibility even when discovery lists only one resource group.
+Cognitive Services OpenAI User is assigned at each configured discovery scope and inherited by its accounts.
+The application only lists accounts inside its configured discovery scopes.
+
+Container Apps references versionless Key Vault secret URLs and mounts the configuration files at:
+
+- `/mnt/lb-config/callers.yaml`.
+- `/mnt/lb-config/overrides.yaml`.
+
+The templates configure the matching discovery file paths and scope environment variables.
+Updating a Key Vault secret does not immediately update every replica.
+Container Apps retrieves new versions of versionless references within thirty minutes; application refresh adds up to five minutes.
+Confirm the mounted file and successful refresh before completing key rotation or relying on a manual drain.
+See [Container Apps secret rotation](https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets#key-vault-secret-uri-and-secret-rotation).
+
+Validate changed templates before deployment:
+
+```sh
+az bicep build --file infra/main.bicep
+az bicep build --file infra/web.bicep
 ```
-info: Yarp.ReverseProxy.Forwarder.HttpForwarder[56]
-info: Received HTTP/2.0 response 429.
-warn: Yarp.ReverseProxy.Health.DestinationHealthUpdater[19]
-warn: Destination `BACKEND_4` marked as 'Unhealthy` by the passive health check is scheduled for a reactivation in `00:00:07`.
+
+Repeat the command for each changed Bicep template.
+The former portal deployment and published legacy image use the removed static configuration; deploy the current source instead.
+
+## Development
+
+Install the .NET 10 SDK. Build and test from the repository root:
+
+```sh
+export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH"
+dotnet build src/openai-loadbalancer.sln
+dotnet test src/openai-loadbalancer.sln
 ```
-Notice that it reads the value coming in the "Retry-After" header from OpenAI response and marks that backend as Unhealthy and it also prints how much time it will take to be reactivated. In this case, 7 seconds.
 
-And this is the log line that appears after that time is elapsed:
+Tests use fake ARM clients, controlled time, and isolated in-process backends.
+They do not need Azure credentials or an external server.
+The runtime uses managed identity; it does not fall back to a developer Azure CLI login.
 
+Build the container from the source directory:
+
+```sh
+docker build -t openai-aca-lb:local ./src
 ```
-info: Yarp.ReverseProxy.Health.DestinationHealthUpdater[20]
-info: Passive health state of the destination `BACKEND_4` is reset to 'Unknown`.
-```
 
-It is OK that it says the status is reset to "Unknown". That means that backend will be actively receiving HTTP requests and its internal state will be updated to Healthy if it receives a 200 response from the OpenAI backend next time. This is called Passive health check and is a [YARP feature](https://microsoft.github.io/reverse-proxy/articles/dests-health-checks.html#passive-health-checks).
-
-
-## :question: FAQ
-
-### What happens if all backends are throttling at the same time?
-In that case, the load balancer will route a random backend in the list. Since that endpoint is throttling, it will return the same 429 error as the OpenAI backend. That's why it is **still important for your client application/SDKs to have a logic to handle retries**, even though it should be much less frequent.
-
-### Reading the C# logic is hard for me. Can you describe it in plain english?
-Sure. That's how it works when the load balancer gets a new incoming request:
-
-1. From the list of backends defined in the environment variables, it will pick one backend using this logic:
-   1. Selects the highest priority (lower number) that is not currently throttling. If it finds more than one healthy backend with the same priority, it will randomly select one of them
-2. Sends the request to the chosen backend URL
-    1. If the backend responds with success (HTTP status code 200), the response is passed to the client and the flow ends here
-    2. If the backend responds with error 429 or 5xx
-        1. It will read the HTTP response header "Retry-After" to see when it will become available again
-        2. Then, it marks that specific backend URL as throttling and also saves what time it will be healthy again
-        3. If there are still other available backends in the pool, it runs again the logic to select another backend (go to the point 1. again and so on)
-        4. If there are no backends available (all are throttling), it will send the customer request to the first backend defined in the list and return its response
-
-## :link: Related articles
-- The same load balancer logic but using Azure API Management: [Smart Load-Balancing for Azure OpenAI with Azure API Management](https://github.com/Azure-Samples/openai-apim-lb/)
+The Dockerfile uses .NET 10 SDK and ASP.NET runtime images. HTTP listens on port 8080.
+Supply discovery configuration and both YAML files when deploying the image.
+The former `BACKEND_*`, latency settings, and `HTTP_TIMEOUT_SECONDS` configuration are removed.
+Use discovery, YAML overrides, and `RequestPipeline` settings instead.
