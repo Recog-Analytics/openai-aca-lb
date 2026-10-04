@@ -4,9 +4,7 @@
       "commandName": "Project",
       "launchBrowser": true,
       "environmentVariables": {
-        "ASPNETCORE_ENVIRONMENT": "Development",
-        "BACKEND_1_URL": "https://recog-oai-lab.openai.azure.com",
-        "BACKEND_1_PRIORITY": "1"
+        "ASPNETCORE_ENVIRONMENT": "Development"
       },
       "dotnetRunMessages": true,
       "applicationUrl": "https://localhost:7151"
