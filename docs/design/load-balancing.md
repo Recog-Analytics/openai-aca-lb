@@ -33,6 +33,10 @@ Health state is keyed by deployment and survives refreshes for deployments that 
 
 - `gpt-4o@2024-11-20` → that version only.
 - `gpt-4o` → the default version from the override file. If none is set and only one version exists, use it. Otherwise return 400 listing the versions.
+- An alias from the override file → its target (a model key or a deployment name). Aliases match case-insensitively and must not equal a discovered model name (the refresh fails with a config error).
+- A discovered deployment name (for example `llm-gpt-4o`) → the pool of all deployments with exactly that name, across accounts. This keeps today's paths working with no config, and keeps separately named deployments of one model (`llm-gpt-4omini` vs `llm-gpt-4omini-public`) as separate pools. If one name maps to different model keys, route anyway and log a warning at refresh.
+- Resolution order: model key → alias → deployment name → 400. Health, weights and degradation peers apply per pool.
+- Request body limit: 26 MB by default (Whisper accepts 25 MB), configurable. Multipart bodies pass through verbatim.
 
 **Tier**, derived from `sku.name`:
 
@@ -57,6 +61,9 @@ One YAML file, reloaded on each refresh. It applies to all replicas, so it is al
 ```yaml
 defaultVersions:
   gpt-4o: "2024-11-20"
+aliases:                                     # legacy deployment names → model key
+  chat: gpt-4o@2024-11-20
+  embedding: text-embedding-3-large@1
 exclude:
   - account: oai-legacy-westeurope           # whole account
   - account: oai-swedencentral
@@ -98,7 +105,7 @@ Open for 30 s, doubling on each failed probe, max 5 min. Half-open allows one re
 
 **Resource-level circuit.** Connect, DNS and TLS errors open the whole account at once. The account also opens when more than half of its deployments are Open. It uses the same half-open logic, then each deployment recovers on its own.
 
-**Degraded.** Measure time to first byte (TTFB): request sent → response headers received. Do not measure total duration, because it depends on output length and client speed. Keep a p95 per deployment over a 5-minute sliding window, with at least 20 samples. A deployment becomes Degraded when both are true:
+**Degraded.** Measure time to first byte (TTFB) on **streaming** requests only: request sent → response headers received. A non-streaming response sends headers only after the whole completion, so its "TTFB" is total generation time and is not recorded. Do not measure total duration, because it depends on output length and client speed. Keep a p95 per deployment over a 5-minute sliding window, with at least 20 samples. A deployment becomes Degraded when both are true:
 
 - its p95 > 2× the median p95 of the other deployments of the same model key, and
 - its p95 > an absolute floor (default 2 s, per-model override).
@@ -136,11 +143,11 @@ none:   429 with the shortest remaining Retry-After if any candidate is Throttle
 ## 8. Retry budget
 
 - Max 3 attempts per request. Never the same deployment twice.
-- Overall deadline 120 s. A client can shorten it with `x-lb-timeout-ms`.
-- Per-attempt TTFB timeout: 30 s non-streaming, 15 s streaming. No total-duration timeout.
+- Overall deadline: default 120 s, configurable up to 600 s. A client can shorten it with `x-lb-timeout-ms`.
+- Per-attempt TTFB timeout, streaming: 15 s. Non-streaming: no separate per-attempt timeout by default (the overall deadline applies), because headers arrive only after the full completion; optionally configurable. No total-duration timeout on streams.
 - Global retry budget per replica: retries ≤ 20% of requests over 10 s, with a floor of 10 retries/s. Over budget, return the error and do not retry.
 - All candidates Throttled: if the shortest Retry-After fits in the remaining deadline, wait once and retry. Otherwise return 429 with that Retry-After.
-- Buffer the request body for retries. Limit 16 MB, else 413.
+- Buffer the request body for retries. Limit 26 MB by default (configurable), else 413.
 
 ## 9. Backend auth
 
