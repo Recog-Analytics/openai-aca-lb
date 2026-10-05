@@ -10,7 +10,8 @@ Status: agreed, not implemented. Goal: run the load balancer (LB) locally agains
 4. `GET /admin/requests?limit=N`: authenticated like `/admin/state`, in-memory ring buffer of the last 500 requests per replica. Each entry has:
    - id, start time, caller name, requested model, resolved model key, zone, streaming flag
    - final status, total duration
-   - attempts: deployment, account, region, tier, status, TTFB, health outcome, retry reason
+   - operation, API version, request bytes, requested output limit
+   - attempts: deployment, account, region, tier, status, TTFB, health outcome, retry reason, backend request ID, and for failures the Azure error code and message (max 300 characters)
 
    Never store bodies or keys.
 5. A `Development` profile in `launchSettings.json` / `appsettings.Development.json` pointing at the devkit (section B), with fake credential, 5 s refresh, and files from `tools/devkit/config/`.

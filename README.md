@@ -310,7 +310,13 @@ Each replica retains 500 entries in memory. The default limit is 100; larger lim
 Invalid or nonpositive limits return 400. Health and admin requests do not enter the feed.
 Entries include an ID, UTC start time, caller, requested model, resolved model key, zone, and streaming flag.
 They also include final HTTP status, outcome, total duration in milliseconds, and the backend attempt chain.
+Request context: `operation` (path slug such as `chat.completions`, `responses`, `embeddings`, or `other`),
+`apiVersion` (well-formed `api-version` query value), `requestBytes`, and `maxOutputTokens`.
+`maxOutputTokens` comes from `max_completion_tokens`, then `max_tokens`, then `max_output_tokens`, integers only.
 Attempts include deployment/account names, region, tier, backend status, TTFB in milliseconds, health outcome, and retry reason.
+Attempts also include `backendRequestId` from `apim-request-id` or `x-request-id`, for Azure support cases.
+Failed attempts with a JSON error body include `errorCode` (max 64 characters) and `errorMessage` (max 300 characters).
+The LB reads at most the first 8 KiB of non-2xx JSON bodies for these fields. It never reads success bodies.
 Backend status and TTFB are null when no response headers arrive. Terminal attempts have no retry reason.
 `client_abort` and `failure` outcomes distinguish interrupted responses from ordinary HTTP errors.
 Total duration includes response streaming; active streams appear after completion or disconnect.
@@ -442,6 +448,7 @@ The former portal deployment and published legacy image use the removed static c
 
 `infra/dashboard.bicep` deploys the dashboard as a separate Container App with external ingress and exactly one replica.
 The service merges replica batches in memory, so it must not scale out.
+Its history (one hour per second, one day per minute) is in memory too, so a restart or new revision starts it empty.
 It has its own user-assigned identity with only AcrPull.
 
 The template creates a single-tenant app registration and its service principal through the Microsoft Graph Bicep extension (`infra/bicepconfig.json`).
@@ -531,7 +538,7 @@ To start the LB alone, use `dotnet run --project src/openai-loadbalancer.csproj 
 
 The separate `dashboard/server` service accepts LB batches at `POST /ingest`.
 It serves an initial snapshot and one merged delta per second at `GET /api/stream`.
-Request events remain available for two minutes after receipt. Replica state expires after thirty seconds without a batch.
+The snapshot carries request events received in the last two minutes. Replica state expires after thirty seconds without a batch.
 Deployment state uses this precedence: Disabled, Open, Throttled, Degraded, Healthy.
 Each deployment includes individual replica states and the largest replica p95 TTFB.
 Each delta replaces merged state and rates. Its request array contains new sampled completions.
@@ -539,8 +546,35 @@ Deployment rates count backend attempts, including retries, with an outcome coun
 LB batches sample at most 200 request events; browser deltas sample at most 100 across all replicas.
 Counts include attempts from unsampled requests. Slow browsers keep only the two latest queued deltas.
 Route counts are not sampled either. A route is the caller, model, zone, final status, and attempt chain (deployment and outcome per attempt).
-Each delta carries the route counts of its second in `routes`. The snapshot carries the retained two minutes as `routeHistory`, one entry per second.
+Each delta carries the route counts of its second in `routes`. The snapshot carries the last two minutes as `routeHistory`, one entry per second.
 Older LB builds send no routes; the service accepts their batches unchanged.
+Each frame numbers the live replicas in `replicaNumbers` ("Replica 1…N"). A new replica takes the lowest free number and keeps it while it sends batches.
+
+The service keeps history in memory. A restart loses it; one replica holds all of it.
+
+| Data | Retention | Hard cap (oldest out first) |
+| --- | --- | --- |
+| Route counts per second | 1 hour | 3,600 seconds, 200,000 route entries |
+| Merged deployment state per second, stored on change | 1 hour | 100,000 changes |
+| Per-minute route counts and worst state per deployment | 24 hours | 1,440 minutes, 400,000 route entries, 100,000 states |
+| Sampled request events: every failure or retry, at most 4 others per second | 1 hour | 20,000 events and an estimated 32 MiB; others leave before failures and retries |
+| Request events for the live snapshot, unthinned | 2 minutes | 20,000 events and an estimated 32 MiB |
+| Latest record of each deployment seen | 24 hours | 5,000 deployments |
+| Interned route shapes | while referenced | 10,000; further new shapes count under caller `(other)` |
+
+Ingest rejects identifiers longer than 512 characters, so history never cuts one (an ARM deployment ID is about 170). At every cap, including 20,000 interned strings of up to 512 characters, history uses about 180 MB.
+A typical day (71 deployments, 40 route entries/s, a few unhealthy deployments, 40 requests/s) uses about 30 MB, mostly request events.
+At 40 requests/s with 2 % failures or retries, the hour holds about 17,300 events: all 2,880 notable ones and 4 others per second.
+
+The snapshot does not carry the day in detail. Besides two minutes of requests and route ticks, it carries `summary`: one bucket per closed minute of the retained day with total, served, retried, failed, and refused requests, the worst deployment state, and the number of unhealthy deployments.
+A delta whose tick closes a minute carries that one bucket in `summary`. `retention` gives the earliest instants with per-second and per-minute data.
+
+`GET /api/history?from=<ISO>&to=<ISO>&resolution=<seconds>` returns detail for a past range, behind the same sign-in as the stream.
+Resolutions are 1, 10, 30, 60, 300, 600, 1800, and 3600 seconds. The service returns 400 for an unparsable instant, another resolution, `from` not before `to`, or more than 1,500 buckets.
+It clamps the range to retention. Resolutions below a minute use per-second data only; a minute or more uses per-minute data for a range that starts before the per-second hour.
+Each bucket ends on a multiple of the resolution and holds route counts and, per unhealthy deployment, the worst state and its unhealthy seconds.
+The response also holds up to 1,000 sampled requests (failures and retries first) and every deployment seen in the range, including removed ones.
+JSON responses and static files are compressed with Brotli or gzip; the SSE stream is not.
 
 Set `Dashboard__IngestUrl` on the LB to enable publishing. An empty value disables it.
 Set `Dashboard__Audience` to the dashboard app registration's client ID (Bicep does this) or its Application ID URI.
@@ -566,20 +600,32 @@ DevAuth fails startup outside Development. This mode uses only simulated local c
 The page answers four questions, in this order.
 
 - Is anything wrong, and where? The headline states it in words ("East US 2 is down"), followed on the same line by five figures: served, failed or refused, after a retry, spilled to a lower tier, and requests per second. The side panel lists each problem with its cause, timer, and effect on traffic. The browser tab title and icon show the verdict too. When the live stream stops for 5 s or more, the header says so.
-- Where does traffic go? The scene is a funnel that reads left to right: callers, LB, region, deployment. Each region appears once; Global deployments form their own place. Under the LB, "Served by tier" gives the share each tier served and the share that spilled into it from a higher tier. Ribbon width is the share of requests that reached the node; the figure shows the share it served, in larger type for larger shares. Region labels sit in boxes that the ribbons enter and leave, so no text sits on a ribbon. Blue and red stripes in a ribbon are requests that left the node after a 429 or a failure. A deployment shows its share by weight when its actual share is clearly off it. Healthy deployments that take almost no traffic get a short lane and a one-line label. Requests refused by the LB end in their own red box.
+- Where does traffic go? The scene is a funnel that reads left to right: callers, LB, region, deployment ("By region", the default). "By model" groups by model instead: callers, LB, model, region. Each group appears once; Global deployments form their own place. Under the LB, "Served by tier" gives the share each tier served and the share that spilled into it from a higher tier. Ribbon width is the share of requests that reached the node; the figure shows the share it served, in larger type for larger shares. Region labels sit in boxes that the ribbons enter and leave, so no text sits on a ribbon. Blue and red stripes in a ribbon are requests that left the node after a 429 or a failure. A deployment shows its share by weight when its actual share is clearly off it. The scene is built for 70 and more deployments:
+  - Healthy deployments under 0.5 % of the window's requests fold into one lane per group, "12 quiet 0.4 %" (or "2 idle" when they took nothing). They unfold again above 1 %. Click the lane to list them; click again to fold them.
+  - A deployment with a problem never folds and gets a taller label. Four or more deployments of one group with the same problem share one lane, such as "19 deployments down, Open, probe in 81 s" when an account is unreachable. A problem lane stays 15 s after the problem ends, so a deployment that flaps does not move every lane.
+  - In the model view, models nobody uses gather in one "12 idle models" group.
+  - Labels drop from three lines to two to one as lanes get shorter. A lane is never shorter than its label, so labels never overlap. When even one-line labels do not fit, the scene scrolls.
+  - Requests refused by the LB end in their own red box, kept in view at the bottom of the scene.
 - Why did requests fall back? "Fallbacks and failures" lists the attempt chains with exact counts ("France 429 → Germany served, 0.3 %"). Patterns with fewer than 3 requests and under 0.5 % fold into one line that expands on click. Click a chain to filter the request feed to it. The feed shows retries and failures by default, collapses consecutive requests with the same caller, status, and chain into one row with a count, and holds still while the pointer is over it.
-- How does this compare with a minute ago? Shares cover the last 10 s, 30 s, or minute. The header figures and any node share that moved by 5 points or more show the change against the same window a minute earlier. The time strip is a chart of requests per second with a scale and a legend. It marks both windows, and pointing at a bar reads it out.
+- How does this compare with earlier? The time strip shows the last 2 min, 15 min, 1 h, or 24 h. It is a chart of requests per second with a scale, a legend, and a thin track that marks when any deployment had a problem; time with no retained data is hatched. The figures and the funnel cover a window that ends at the playhead: 10 s, 30 s, or 1 min in the 2-minute range; 1, 5, or 15 min; 5 min, 15 min, or 1 h; 1, 6, or 24 h in the longer ranges. In the 2-minute range, changes compare with the same window a minute earlier; in the longer ranges, with the window before. Click or drag the strip to look back. In the past, a blue "Not live" band over the verdict names the time shown, the stage gets a blue outline, and "Back to live" returns. Longer ranges fetch their detail from `/api/history` when chosen, and the figures never claim more time than the retained data covers.
 
 All shares are exact: they come from unsampled route counts, never from the sampled particles.
 Sampled requests travel their attempt chain as particles. A failed attempt bounces back to the LB in red, a 429 in blue. A streaming response flows back along its route until it ends.
 Deployment states: Healthy (green ring), Throttled (blue ring that drains until the cooldown ends), Degraded (amber pulse), Open (dimmed, broken link), half-open (one probe dot in the gap), Disabled (grey, struck through). Each deployment also states its condition in text.
-Hover a node to highlight its part of the funnel; for a deployment, also where its requests fell back to. Hover or focus a deployment for weight, tier, zone, p95, attempt rate, exact traffic shares with request counts, outcome mix, and per-replica states. Hover a tier in "Served by tier" to highlight its deployments. Click a particle or a feed row for its attempt chain.
-Filter by model, zone, and caller; filters, the window, and the feed mode stay in the URL. Pause, scrub, or replay the last two minutes. Space pauses, the arrow keys scrub, and Escape clears the selection.
+Hover a node to highlight its part of the funnel; for a deployment, also where its requests fell back to. Hover or focus a deployment for weight, tier, zone, p95, attempt rate, exact traffic shares with request counts, outcome mix, and per-replica states.
+Names are human everywhere: regions by their Azure display name ("Poland Central"), replicas as "Replica 1…N" in the service's first-seen order, and two pools of one model as the model plus a suffix ("gpt-4o-mini · public"). Raw deployment, account, replica, and request IDs appear only as secondary text in hover cards and request detail.
+Click a feed row for the request: operation, API version, body size, output limit, streaming, caller, and each attempt with its region, model, status, time to first byte, the backend's error code and message, and the Azure request ID for support. Rows with a failure show the error code and the start of the message. Hover a tier in "Served by tier" to highlight its deployments. Click a particle or a feed row for its attempt chain.
+Filter by model, zone, and caller; filters, the window, and the feed mode stay in the URL. Pause, scrub, or replay the live two minutes; look back further with the time ranges. Space pauses, the arrow keys scrub, and Escape clears the selection.
+The look follows the Recog brand of the ops portal: its shadcn colour tokens (neutral base, blue primary, success, warning, destructive), the Geist font, its radius scale, and the Recog mark in the toolbar and on the loading page. State colours map onto the brand: healthy is success, throttled the primary blue, slow the warning amber, failed the destructive red. Where a brand colour is too light or dark for WCAG AA as text, only its lightness changes; `theme.ts` notes each case, and a test keeps the stylesheet's colours equal to the canvas palette.
 The page follows the system light or dark preference, has a theme toggle, and honours reduced motion: particles do not travel, results fade at their destination. On a phone, the funnel scrolls sideways.
 The scene plays 2.5 seconds behind the server so that late batches still play in completion order.
 
-Add `?demo=<scenario>` to run without a backend: `calm`, `sweden-slow`, `france-throttled`, `eastus2-outage`, or `eu-down`.
-The demo simulates the LB's selection, retries, and health rules in the browser and uses the devkit inventory.
+Add `?demo=<scenario>` to run without a backend:
+- the production inventory (71 deployments in 5 regions, about 21 models, skewed traffic from 4 illustrative callers): `production`, `production-sweden-slow`, `production-france-throttled`, `production-sweden-outage`, or `production-eu-down`;
+- the devkit inventory: `calm`, `sweden-slow`, `france-throttled`, `eastus2-outage`, or `eu-down`.
+
+The demo simulates the LB's selection, retries, and health rules in the browser. It also answers the history ranges with a generated day that includes past incidents.
+Also `?view=model`, `?range=15m|1h|24h`, and `?theme=light|dark`.
 For development, run `bun install` and `bun run dev` in `dashboard/web`. Vite proxies `/api` to `http://localhost:5200`, or to `DASHBOARD_URL`.
 Checks: `bun run typecheck`, `bun run lint`, and `bun test`.
 

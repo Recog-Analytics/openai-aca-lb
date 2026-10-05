@@ -8,9 +8,12 @@
 - Map legacy names to a model key or a deployment name with `aliases` in the override file. An alias that equals a discovered model name fails the refresh.
 - Report the pool kind and pool name in `/admin/requests` and dashboard routes.
 - Configure the request body limit with `RequestPipeline__MaximumBodyBytes`.
+- Record what each request was in `/admin/requests` and dashboard events: operation, API version, request bytes, requested output limit, and per attempt the backend request ID plus the Azure error code and message (bounded, from non-2xx JSON bodies only). The devkit fake accounts send Azure-style error bodies and `apim-request-id`.
+- Keep dashboard history in memory with hard caps: per-second route counts and states for an hour, per-minute aggregates for a day, and up to 20,000 request events for an hour. The snapshot adds a per-minute day `summary`, `retention`, and stable `replicaNumbers`; `GET /api/history` returns detail for a past range, compressed.
 
 - Add an isolated LB dashboard publisher, authenticated ingest service, replica merge, and live SSE placeholder on port 5200.
 - Retain two minutes of dashboard request events, expire stale replicas, and publish unsampled deployment attempt counts.
+- Scale the dashboard to the production inventory (71 deployments): a region or model view, quiet and same-problem deployments folded into one lane each, label density that follows lane height so labels never overlap, time ranges of 2 min to 24 h with a not-live band, human names for regions, replicas and pools, request context and backend errors in the request detail, a `?demo=production` scenario set, and the Recog brand (tokens, Geist, mark, loading page).
 - Add the animated dashboard web app: request particles, deployment state rings, hover detail, request feed, filters, pause and scrub, light and dark themes, reduced motion, and an in-browser demo mode.
 - Publish each deployment's throttle deadline, circuit open deadline, and half-open flag to the dashboard.
 - Publish unsampled route counts (caller, model, zone, final status, attempt chain) from the LB, and stream them per second with two minutes of history in the dashboard snapshot.
