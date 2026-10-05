@@ -2,3 +2,6 @@
 **/[Bb]in/
 **/[Oo]bj/
 **/[Tt]est[Rr]esults/
+
+# Dashboard web build output
+dashboard/server/wwwroot/

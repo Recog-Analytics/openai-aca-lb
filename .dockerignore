@@ -1,0 +1,9 @@
+# Build context for dashboard/Dockerfile (repository root). The LB image uses src/ as its context and src/.dockerignore.
+*
+!dashboard/server/
+!dashboard/web/
+!src/Contracts/
+**/bin/
+**/obj/
+**/node_modules/
+dashboard/server/wwwroot/
