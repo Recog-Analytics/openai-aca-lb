@@ -2,12 +2,13 @@ import { AnimatePresence, motion } from "motion/react";
 import { useState } from "react";
 import { percent, type Issue } from "../model/attention";
 import { splitPaths, type FallbackPath, type Funnel } from "../model/funnel";
+import { spanLabel } from "../model/history";
 import { modelShort, regionName } from "../model/state";
 import type { DashboardDeployment, DashboardHop } from "../model/types";
 
 const enter = { type: "spring", duration: 0.35, bounce: 0 } as const;
 
-/** "Sweden", "Germany", "East US 2 PTU": short enough for a chain of three. */
+/** "Sweden", "Germany", "Poland", "East US 2 PTU": short enough for a chain of three. */
 export function placeShort(deployment: DashboardDeployment | undefined): string {
   if (!deployment) return "Unknown";
   const name = regionName(deployment.region).replace(/\s+(West |North |South |East )?Central$/, "");
@@ -41,14 +42,16 @@ interface Props {
   issues: Issue[];
   funnel: Funnel;
   byId: Map<string, DashboardDeployment>;
-  windowLabel: string;
+  labels: Map<string, string>;
+  windowSeconds: number;
   selectedPath: string | null;
   onFocus: (deploymentIds: string[] | null) => void;
   onPath: (key: string | null) => void;
 }
 
 /** What needs attention and why requests fell back: the two answers that sit above the request feed. */
-export function Insights({ issues, funnel, byId, windowLabel, selectedPath, onFocus, onPath }: Props) {
+export function Insights({ issues, funnel, byId, labels, windowSeconds, selectedPath, onFocus, onPath }: Props) {
+  const windowLabel = spanLabel(windowSeconds);
   const [showRare, setShowRare] = useState(false);
   const { notable, rare } = splitPaths(funnel);
   const rareCount = rare.reduce((sum, path) => sum + path.count, 0);
@@ -92,7 +95,7 @@ export function Insights({ issues, funnel, byId, windowLabel, selectedPath, onFo
                 <button type="button" className="path" aria-pressed={selectedPath === path.key}
                   onClick={() => onPath(selectedPath === path.key ? null : path.key)}
                   onPointerEnter={() => onFocus(path.hops.map((hop) => hop.deploymentId))} onPointerLeave={() => onFocus(null)}>
-                  <span className="path-model">{pathModel(path, byId)}</span>
+                  <span className="path-model">{pathModel(path, byId, labels)}</span>
                   <Chain hops={path.hops} status={path.status} byId={byId} />
                   <span className="path-count">
                     <strong>{share(path.count)}</strong>
@@ -116,7 +119,7 @@ export function Insights({ issues, funnel, byId, windowLabel, selectedPath, onFo
   );
 }
 
-function pathModel(path: FallbackPath, byId: Map<string, DashboardDeployment>): string {
+function pathModel(path: FallbackPath, byId: Map<string, DashboardDeployment>, labels: Map<string, string>): string {
   const first = path.hops[0];
-  return first ? modelShort(byId.get(first.deploymentId)?.modelKey ?? null) : "Any model";
+  return first ? labels.get(first.deploymentId) ?? modelShort(byId.get(first.deploymentId)?.modelKey ?? null) : "Any model";
 }

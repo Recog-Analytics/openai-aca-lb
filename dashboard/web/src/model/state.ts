@@ -1,4 +1,7 @@
-import { parseTime } from "./timeline";
+import { modelName, regionName } from "./names";
+import { parseTime, type FrameState } from "./timeline";
+
+export { regionName };
 import type { DashboardDeployment, DeploymentRate, HealthStateName, MergedDeployment, RequestAttempt, RequestRecord } from "./types";
 
 export type NodeLook = "healthy" | "throttled" | "degraded" | "open" | "halfOpen" | "disabled" | "absent";
@@ -77,28 +80,6 @@ export function outcomeMix(rate: DeploymentRate | undefined): OutcomeShare[] {
     .sort((a, b) => rank(a.outcome) - rank(b.outcome));
 }
 
-const regionNames: Record<string, string> = {
-  swedencentral: "Sweden Central",
-  francecentral: "France Central",
-  germanywestcentral: "Germany West Central",
-  westeurope: "West Europe",
-  northeurope: "North Europe",
-  switzerlandnorth: "Switzerland North",
-  uksouth: "UK South",
-  eastus: "East US",
-  eastus2: "East US 2",
-  westus: "West US",
-  westus3: "West US 3",
-  southcentralus: "South Central US",
-  japaneast: "Japan East",
-  australiaeast: "Australia East",
-};
-
-/** Azure region display name; unknown regions fall back to the identifier. */
-export function regionName(region: string): string {
-  return regionNames[region.toLowerCase()] ?? region;
-}
-
 /** Compact region label for attempt chains: "sweden", "eastus2". */
 export function regionShort(region: string): string {
   const name = region.toLowerCase();
@@ -106,10 +87,7 @@ export function regionShort(region: string): string {
   return match?.[1] && !/\d/.test(name) ? match[1] : name;
 }
 
-export function modelShort(modelKey: string | null): string {
-  if (!modelKey) return "unknown";
-  return modelKey.split("@")[0]?.replace(/^text-embedding-/, "embed-") ?? modelKey;
-}
+export const modelShort = modelName;
 
 export function tierName(tier: number): string {
   return tier === 0 ? "Provisioned" : tier === 1 ? "Standard" : tier === 2 ? "Global" : `Tier ${tier}`;
@@ -143,6 +121,23 @@ export function statusText(visual: NodeVisual, item: MergedDeployment | undefine
     case "absent": return "Not reported";
     default: return null;
   }
+}
+
+const lookRank: Record<NodeLook, number> = { open: 6, halfOpen: 5, throttled: 4, degraded: 3, disabled: 2, absent: 1, healthy: 0 };
+
+/**
+ * The member a folded lane speaks for: the worst current state (a recovered member never makes the lane look healthy),
+ * then the slowest p95, the longest cooldown, the soonest probe.
+ */
+export function worstMember(ids: string[], frame: FrameState | null, t: number): { id: string; item: MergedDeployment | undefined; visual: NodeVisual } | null {
+  let best: { id: string; item: MergedDeployment | undefined; visual: NodeVisual; score: number } | null = null;
+  for (const id of ids) {
+    const item = frame?.deployments.get(id);
+    const visual = nodeVisual(item, frame?.throttledSince.get(id), t);
+    const score = lookRank[visual.look] * 1e9 + (item?.deployment.p95TtfbMs ?? 0) + (visual.cooldownMs ?? 0) - (visual.probeInMs ?? 0);
+    if (!best || score > best.score) best = { id, item, visual, score };
+  }
+  return best;
 }
 
 /** A place's name in the funnel: the region, or "Global" for a Global deployment. */

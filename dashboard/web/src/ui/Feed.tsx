@@ -1,5 +1,6 @@
 import { AnimatePresence, motion } from "motion/react";
 import { useState, type ReactNode } from "react";
+import { bytesLabel, operationName } from "../model/names";
 import {
   attemptTone, durationLabel, modelShort, regionName, requestTone, tierName,
 } from "../model/state";
@@ -19,6 +20,8 @@ interface Props {
   pathLabel: ReactNode;
   onClearPath: () => void;
   byId: Map<string, DashboardDeployment>;
+  /** Readable pool label per deployment id. */
+  labels: Map<string, string>;
   selected: RequestRecord | null;
   onSelect: (id: string | null) => void;
 }
@@ -26,7 +29,7 @@ interface Props {
 const enter = { type: "spring", duration: 0.35, bounce: 0 } as const;
 const MAX_ROWS = 40;
 
-export function Feed({ items, t, mode, onMode, pathLabel, onClearPath, byId, selected, onSelect }: Props) {
+export function Feed({ items, t, mode, onMode, pathLabel, onClearPath, byId, labels, selected, onSelect }: Props) {
   const [held, setHeld] = useState<TimedRequest[] | null>(null);
   const [grouper] = useState(() => new RunGrouper());
   const shown = grouper.group(held ?? items).slice(0, MAX_ROWS);
@@ -48,7 +51,7 @@ export function Feed({ items, t, mode, onMode, pathLabel, onClearPath, byId, sel
         </p>
       )}
       <AnimatePresence initial={false}>
-        {selected && <RequestDetail key={selected.id} request={selected} onClose={() => onSelect(null)} />}
+        {selected && <RequestDetail key={selected.id} request={selected} byId={byId} labels={labels} onClose={() => onSelect(null)} />}
       </AnimatePresence>
       <div className="feed-hold" aria-live="polite">
         {held ? <span>{waiting === 0 ? "Paused while you read" : `Paused while you read, ${waiting} new`}</span>
@@ -61,7 +64,7 @@ export function Feed({ items, t, mode, onMode, pathLabel, onClearPath, byId, sel
           {shown.map((run) => (
             <motion.li key={run.key} className="feed-item" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }}
               transition={enter}>
-              <FeedRow run={run} t={t} byId={byId} active={run.items.some((item) => item.request.id === selected?.id)} onSelect={onSelect} />
+              <FeedRow run={run} t={t} byId={byId} labels={labels} active={run.items.some((item) => item.request.id === selected?.id)} onSelect={onSelect} />
             </motion.li>
           ))}
         </AnimatePresence>
@@ -70,8 +73,21 @@ export function Feed({ items, t, mode, onMode, pathLabel, onClearPath, byId, sel
   );
 }
 
-function FeedRow({ run, t, byId, active, onSelect }: {
-  run: Run; t: number; byId: Map<string, DashboardDeployment>; active: boolean; onSelect: (id: string | null) => void;
+/** What the request asked for, in words: its model (pool label when known) and operation. */
+function requestName(request: RequestRecord, byId: Map<string, DashboardDeployment>, labels: Map<string, string>): string {
+  const id = request.attempts[0]?.deploymentId;
+  const model = (id && byId.has(id) ? labels.get(id) : null) ?? modelShort(request.modelKey ?? request.requestedModel);
+  return model;
+}
+
+/** The backend's error on the last attempt that has one: "429 · Requests to the ChatCompletions_Create Operation…". */
+function lastError(request: RequestRecord): { code: string; message: string | null } | null {
+  const attempt = [...request.attempts].reverse().find((item) => item.errorCode || item.errorMessage);
+  return attempt ? { code: attempt.errorCode ?? String(attempt.status ?? "error"), message: attempt.errorMessage ?? null } : null;
+}
+
+function FeedRow({ run, t, byId, labels, active, onSelect }: {
+  run: Run; t: number; byId: Map<string, DashboardDeployment>; labels: Map<string, string>; active: boolean; onSelect: (id: string | null) => void;
 }) {
   const [item] = run.items;
   if (!item) return null;
@@ -81,12 +97,13 @@ function FeedRow({ run, t, byId, active, onSelect }: {
   const ago = (entry: TimedRequest | undefined) => Math.max(0, Math.round((t - (entry?.completedAt ?? t)) / 1000));
   const newest = ago(item);
   const oldest = ago(run.items.at(-1));
+  const error = tone === "ok" ? null : lastError(request);
   return (
     <button type="button" className="feed-row" data-tone={tone} aria-pressed={active} onClick={() => onSelect(active ? null : request.id)}
       aria-label={count > 1 ? `${count} identical requests, newest ${newest} seconds ago` : undefined}>
       <span className="row-status">{request.status}{count > 1 && <span className="row-count">×{count}</span>}</span>
       <span className="row-main">
-        <span className="row-who">{request.caller ?? "unknown"} <span className="row-model">{[...new Set(run.items.map((entry) => modelShort(entry.request.modelKey)))].join(", ")}</span></span>
+        <span className="row-who">{request.caller ?? "unknown"} <span className="row-model">{[...new Set(run.items.map((entry) => requestName(entry.request, byId, labels)))].join(", ")}{operationName(request.operation) ? `, ${operationName(request.operation)?.toLowerCase()}` : ""}</span></span>
         <span className="chain">
           {request.attempts.length === 0 ? <span className="hop" data-tone={tone}>refused by LB</span>
             : request.attempts.map((attempt, index) => (
@@ -96,6 +113,7 @@ function FeedRow({ run, t, byId, active, onSelect }: {
               </span>
             ))}
         </span>
+        {error && <span className="row-error"><strong>{error.code}</strong>{error.message ? ` ${error.message}` : ""}</span>}
       </span>
       <span className="row-meta">
         <span>{durationLabel(request.durationMs)}</span>
@@ -114,44 +132,70 @@ const reasons: Record<string, string> = {
   transport_error: "Connection failed, retried",
 };
 
-function RequestDetail({ request, onClose }: { request: RequestRecord; onClose: () => void }) {
+function RequestDetail({ request, byId, labels, onClose }: {
+  request: RequestRecord; byId: Map<string, DashboardDeployment>; labels: Map<string, string>; onClose: () => void;
+}) {
   const started = new Date(request.startedAt);
+  const operation = operationName(request.operation);
+  const facts: [string, string][] = [
+    ["Caller", request.caller ?? "Unknown"],
+    ["Operation", operation ?? "Not recorded"],
+    ["API version", request.apiVersion ?? (request.operation ? "None" : "Not recorded")],
+    ["Request body", bytesLabel(request.requestBytes) ?? "Not recorded"],
+    ["Output limit", request.maxOutputTokens != null ? `${request.maxOutputTokens.toLocaleString()} tokens` : request.operation ? "Not set" : "Not recorded"],
+    ["Streaming", request.streaming ? "Yes" : "No"],
+    ["Zone", request.zone ?? "Default"],
+  ];
   return (
     <motion.section className="detail" aria-label="Selected request"
       initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }}
       transition={{ type: "spring", duration: 0.35, bounce: 0 }}>
-      <div className="detail-inner">
+      <div className="detail-inner" data-tone={requestTone(request)}>
         <div className="detail-head">
           <div>
-            <h3>{request.caller ?? "Unknown caller"}, {modelShort(request.modelKey)}</h3>
+            <h3>{requestName(request, byId, labels)}{operation ? `, ${operation.toLowerCase()}` : ""}</h3>
             <p>
-              {request.status} after {durationLabel(request.durationMs)}{request.streaming ? ", streamed" : ""}.
-              Zone {request.zone ?? "default"}. Started {started.toLocaleTimeString()}.
+              <span className="detail-status">{request.status}</span> after {durationLabel(request.durationMs)}, started {started.toLocaleTimeString()}.
             </p>
           </div>
           <button type="button" className="close" onClick={onClose} aria-label="Close request detail">
             <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
           </button>
         </div>
+        <dl className="facts request-facts">
+          {facts.map(([label, value]) => <Fact key={label} label={label} value={value} />)}
+        </dl>
         <ol className="attempts">
           {request.attempts.length === 0 && <li className="attempt-none">The LB answered without trying a deployment: no candidate was available.</li>}
-          {request.attempts.map((attempt, index) => (
-            <li key={index} className="attempt" data-tone={attemptTone(attempt)}>
-              <span className="attempt-index">{index + 1}</span>
-              <span className="attempt-body">
-                <span><strong>{attempt.deployment}</strong> in {regionName(attempt.region)}</span>
-                <span className="attempt-sub">{attempt.account}, {tierName(attempt.tier)}</span>
-                {attempt.retryReason && <span className="attempt-reason">{reasons[attempt.retryReason] ?? attempt.retryReason}</span>}
-              </span>
-              <span className="attempt-result">
-                <strong>{attempt.status ?? "—"}</strong>
-                <span>{attempt.ttfbMs === null ? "no headers" : `TTFB ${durationLabel(attempt.ttfbMs)}`}</span>
-              </span>
-            </li>
-          ))}
+          {request.attempts.map((attempt, index) => {
+            const deployment = attempt.deploymentId ? byId.get(attempt.deploymentId) : undefined;
+            const place = deployment?.zone === "global" ? `Global (${regionName(attempt.region)})` : regionName(attempt.region);
+            return (
+              <li key={index} className="attempt" data-tone={attemptTone(attempt)}>
+                <span className="attempt-index">{index + 1}</span>
+                <span className="attempt-body">
+                  <span><strong>{place}</strong>{deployment ? ` ${labels.get(deployment.id) ?? modelShort(deployment.modelKey)}` : ""}</span>
+                  <span className="attempt-sub">{attempt.deployment} in {attempt.account}, {tierName(attempt.tier)}</span>
+                  {attempt.retryReason && <span className="attempt-reason">{reasons[attempt.retryReason] ?? attempt.retryReason}</span>}
+                  {(attempt.errorCode || attempt.errorMessage) && (
+                    <span className="attempt-error"><strong>{attempt.errorCode ?? "Error"}</strong>{attempt.errorMessage && <span>{attempt.errorMessage}</span>}</span>
+                  )}
+                  {attempt.backendRequestId && <span className="attempt-sub">Azure request ID <span className="id">{attempt.backendRequestId}</span></span>}
+                </span>
+                <span className="attempt-result">
+                  <strong>{attempt.status ?? "—"}</strong>
+                  <span>{attempt.ttfbMs === null ? "no headers" : `TTFB ${durationLabel(attempt.ttfbMs)}`}</span>
+                </span>
+              </li>
+            );
+          })}
         </ol>
-        <p className="detail-id">Request {request.id}</p>
+        <p className="detail-id">LB request <span className="id">{request.id}</span>. The LB never records prompts, completions or keys.</p>
       </div>
     </motion.section>
   );
+}
+
+function Fact({ label, value }: { label: string; value: string }) {
+  return <><dt>{label}</dt><dd>{value}</dd></>;
 }

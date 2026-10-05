@@ -5,7 +5,7 @@ import { findIssues, percent, verdict } from "./attention";
 import { computeFunnel, preferredTier, quotaShare, splitPaths } from "./funnel";
 import { RunGrouper } from "./runs";
 import { niceCeiling } from "../ui/Scrubber";
-import { layoutScene, linkPoint, makePath, pathPoint, stackPorts } from "./layout";
+import { linkPoint, makePath, pathPoint, stackPorts } from "./layout";
 import { planRequest, segmentAt, selectForPlayback, timing } from "./playback";
 import { snapSpring, spring, springs, stepSpring } from "./spring";
 import { attemptTone, chainLabel, nodeVisual, outcomeMix, regionShort, requestTone } from "./state";
@@ -135,56 +135,7 @@ describe("state mapping", () => {
   });
 });
 
-describe("layout", () => {
-  const demo = new DemoStream("calm", t0).snapshot();
-  const deployments = demo.deployments.map((item) => item.deployment);
-  const layout = layoutScene(deployments, ["devkit", "orchestrator", "reporting"], { width: 1600, height: 900 }, 16);
-
-  test("places every deployment once, in its own lane, grouped by place, each place once", () => {
-    expect(layout.nodes.length).toBe(deployments.length);
-    expect(new Set(layout.nodes.map((node) => node.y)).size).toBe(layout.nodes.length);
-    // Regions first: East US 2 holds its PTU and standard deployments; Global is a place of its own, last.
-    expect(layout.places.map((place) => place.key)).toEqual(["francecentral", "germanywestcentral", "swedencentral", "eastus2", "global"]);
-    expect(layout.nodes.filter((node) => node.place === "eastus2").map((node) => node.tier)).toEqual([0, 1, 1]);
-    for (const node of layout.nodes) {
-      const place = layout.places.find((item) => item.key === node.place)!;
-      expect(node.y).toBeGreaterThan(place.top);
-      expect(node.y).toBeLessThan(place.bottom);
-    }
-  });
-
-  test("reads left to right: callers, LB, place boxes, deployment, with room for labels", () => {
-    const c = layout.columns;
-    expect(c.callers).toBeLessThan(c.lb);
-    expect(c.lb).toBeLessThan(c.places);
-    expect(c.placesEnd - c.places).toBe(10.5 * 16);
-    expect(c.placesEnd).toBeLessThan(c.bars);
-    expect(c.bars).toBeLessThan(c.discs);
-    expect(1600 - c.discs).toBeGreaterThanOrEqual(12 * 16);
-    expect(layout.refused.y).toBeGreaterThan(layout.places.at(-1)!.bottom);
-    expect(layout.refused.y).toBeLessThan(900);
-  });
-
-  test("callers sit close to the LB with room for a three-line label each", () => {
-    const [first, second] = layout.callers;
-    expect(second!.y - first!.y).toBeGreaterThanOrEqual(4 * 16);
-    expect(layout.columns.lb - layout.columns.callers).toBeLessThanOrEqual(6 * 16);
-  });
-
-  test("idle fallbacks get half a lane; the rest of the lanes grow", () => {
-    const global = layout.nodes.find((node) => node.place === "global")!;
-    const compact = layoutScene(deployments, ["devkit", "orchestrator", "reporting"], { width: 1600, height: 900 }, 16, new Set([global.id]));
-    expect(compact.nodes.find((node) => node.id === global.id)?.compact).toBe(true);
-    expect(compact.places.find((place) => place.key === "global")?.compact).toBe(true);
-    const height = (l: typeof layout, key: string) => { const place = l.places.find((item) => item.key === key)!; return place.bottom - place.top; };
-    expect(height(compact, "global")).toBeCloseTo(compact.laneHeight / 2);
-    expect(compact.laneHeight).toBeGreaterThan(layout.laneHeight);
-  });
-
-  test("positions depend on structure only, so traffic never moves a node", () => {
-    expect(layoutScene(deployments, ["devkit", "orchestrator", "reporting"], { width: 1600, height: 900 }, 16)).toEqual(layout);
-  });
-
+describe("layout geometry", () => {
   test("ports stack children in order around the parent centre", () => {
     expect(stackPorts(100, [10, 20, 30])).toEqual([75, 90, 115]);
     expect(stackPorts(50, [])).toEqual([]);

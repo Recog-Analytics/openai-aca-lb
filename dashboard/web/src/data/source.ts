@@ -1,6 +1,7 @@
 import { DemoStream, type Scenario } from "../model/demo";
+import type { HistoryFetcher } from "../model/history";
 import type { Timeline } from "../model/timeline";
-import type { DashboardFrame, FrameKind } from "../model/types";
+import type { DashboardFrame, FrameKind, HistoryResponse } from "../model/types";
 
 export type Connection =
   | { kind: "connecting" }
@@ -15,17 +16,42 @@ function isFrame(value: unknown): value is DashboardFrame {
     Array.isArray(frame.counts) && Array.isArray(frame.replicas);
 }
 
-/** Feeds the timeline from /api/stream, or from the in-browser demo stream. Returns a stop function. */
-export function startSource(timeline: Timeline, scenario: Scenario | null, onConnection: (connection: Connection) => void): () => void {
+function isHistory(value: unknown): value is HistoryResponse {
+  if (typeof value !== "object" || value === null) return false;
+  const history = value as Record<string, unknown>;
+  return typeof history.from === "string" && typeof history.resolution === "number" && Array.isArray(history.buckets) &&
+    Array.isArray(history.requests) && Array.isArray(history.deployments);
+}
+
+/** /api/history behind the same sign-in as the stream. */
+async function fetchHistory(from: number, to: number, resolution: number): Promise<HistoryResponse> {
+  const query = new URLSearchParams({ from: new Date(from).toISOString(), to: new Date(to).toISOString(), resolution: String(resolution) });
+  const response = await fetch(`/api/history?${query}`, { credentials: "same-origin" });
+  if (!response.ok) throw new Error(`History unavailable (${response.status})`);
+  const data: unknown = await response.json();
+  if (!isHistory(data)) throw new Error("History response has an unexpected shape");
+  return data;
+}
+
+export interface Source {
+  stop: () => void;
+  history: HistoryFetcher;
+}
+
+/** Feeds the timeline from /api/stream, or from the in-browser demo stream, and fetches history from the same place. */
+export function startSource(timeline: Timeline, scenario: Scenario | null, onConnection: (connection: Connection) => void): Source {
   if (scenario) {
     const demo = new DemoStream(scenario, Date.now());
     timeline.apply("snapshot", demo.snapshot(), Date.now());
     onConnection({ kind: "demo", scenario });
     const timer = window.setInterval(() => timeline.apply("delta", demo.tick(), Date.now()), 1000);
-    // A stopped source leaves nothing behind, so a restarted one (React remounts in development) starts clean.
-    return () => {
-      window.clearInterval(timer);
-      timeline.reset();
+    return {
+      // A stopped source leaves nothing behind, so a restarted one (React remounts in development) starts clean.
+      stop: () => {
+        window.clearInterval(timer);
+        timeline.reset();
+      },
+      history: (from, to, resolution) => Promise.resolve(demo.history(from, to, resolution)),
     };
   }
   onConnection({ kind: "connecting" });
@@ -55,9 +81,12 @@ export function startSource(timeline: Timeline, scenario: Scenario | null, onCon
     };
   };
   connect();
-  return () => {
-    window.clearTimeout(retry);
-    stream?.close();
-    timeline.reset();
+  return {
+    stop: () => {
+      window.clearTimeout(retry);
+      stream?.close();
+      timeline.reset();
+    },
+    history: fetchHistory,
   };
 }

@@ -40,7 +40,7 @@ export interface FallbackPath {
 }
 
 export interface Funnel {
-  /** Seconds of ticks in the window. */
+  /** Seconds of data in the window. */
   seconds: number;
   total: number;
   served: number;
@@ -54,7 +54,7 @@ export interface Funnel {
   rejected: number;
   callers: Map<string, Flow>;
   tiers: Map<number, Flow>;
-  /** Keyed by `placeKey`. */
+  /** Keyed by group: `placeKey` in the region view, the pool label in the model view. */
   places: Map<string, Flow>;
   deployments: Map<string, Flow>;
   /** Fallback and failure patterns, most frequent first. */
@@ -92,11 +92,12 @@ export function isClientError(status: number): boolean {
  * Exact traffic shares down the funnel (caller → LB → tier → region → deployment) for the requests in scope that
  * completed in the given ticks. Pure; counts come from unsampled routes, never from sampled particles.
  */
-export function computeFunnel(ticks: Tick[], deployments: DashboardDeployment[], scope: Scope): Funnel {
+export function computeFunnel(ticks: Tick[], deployments: DashboardDeployment[], scope: Scope,
+  groupOf: (deployment: DashboardDeployment) => string = placeKey): Funnel {
   const byId = new Map(deployments.map((item) => [item.id, item]));
   const preferred = new Map<string, number | null>();
   const funnel: Funnel = {
-    seconds: ticks.length, total: 0, served: 0, fellBack: 0, failed: 0, refused: 0, rejected: 0,
+    seconds: ticks.reduce((sum, tick) => sum + (tick.seconds ?? 1), 0), total: 0, served: 0, fellBack: 0, failed: 0, refused: 0, rejected: 0,
     callers: new Map(), tiers: new Map(), places: new Map(), deployments: new Map(), paths: [],
   };
   const paths = new Map<string, FallbackPath>();
@@ -141,7 +142,7 @@ export function computeFunnel(ticks: Tick[], deployments: DashboardDeployment[],
         const deployment = byId.get(hop.deploymentId);
         levels.push({ key: hop.deploymentId, map: "deployment", hop: index });
         if (!deployment) return;
-        levels.push({ key: placeKey(deployment), map: "place", hop: index });
+        levels.push({ key: groupOf(deployment), map: "place", hop: index });
         levels.push({ key: String(deployment.tier), map: "tier", hop: index });
       });
       // Latest hop per node decides the node's outcome; the earliest decides whether it was the first choice.

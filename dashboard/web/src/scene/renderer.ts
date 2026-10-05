@@ -1,10 +1,10 @@
 import { Application, Container, Graphics, Sprite, Texture } from "pixi.js";
 import type { PlaybackClock } from "../model/clock";
-import type { Flow, Funnel } from "../model/funnel";
-import { linkPoints, makePath, pathPoint, stackPorts, type Path, type Point, type SceneLayout } from "../model/layout";
+import { emptyFlow, type Flow, type Funnel } from "../model/funnel";
+import { linkPoints, makePath, pathPoint, stackPorts, type NodeLayout, type Path, type Point, type SceneLayout } from "../model/layout";
 import { planRequest, segmentAt, selectForPlayback, type Anchor, type ParticleTone, type Plan } from "../model/playback";
 import { snapSpring, spring, springs, stepSpring, type Spring } from "../model/spring";
-import { nodeVisual, type NodeLook } from "../model/state";
+import { nodeVisual, worstMember, type NodeLook, type NodeVisual } from "../model/state";
 import type { FrameState, Timeline } from "../model/timeline";
 import type { DashboardDeployment, RequestRecord } from "../model/types";
 import { hexToNumber, mix, palettes, type Palette } from "../theme";
@@ -19,6 +19,8 @@ export interface SceneInputs {
   emphasis: Set<string> | null;
   palette: Palette;
   reducedMotion: boolean;
+  /** Deployment states from history while the playhead is before the live timeline. */
+  pastFrame: FrameState | null;
   onPick: (id: string | null) => void;
 }
 
@@ -107,7 +109,11 @@ export class SceneRenderer {
 
   update(inputs: Partial<SceneInputs>): void {
     if (inputs.requestFilter && inputs.requestFilter !== this.inputs.requestFilter) this.filterVersion++;
+    const before = this.inputs.layout;
     this.inputs = { ...this.inputs, ...inputs };
+    // Pixi's resizeTo follows window resizes only; the scene also grows and shrinks with its lanes (expanding a group).
+    const after = this.inputs.layout;
+    if (after.contentHeight !== before.contentHeight || after.size.width !== before.size.width) this.app.resize();
   }
 
   /** Binds a DOM label to a scene key; the renderer moves it every frame. */
@@ -116,9 +122,9 @@ export class SceneRenderer {
     else this.labels.delete(key);
   }
 
-  /** Current animated position of a deployment disc, for anchoring popovers. */
+  /** Current animated position of a deployment disc (or the idle lane that holds it), for anchoring popovers. */
   nodePosition(id: string): (Point & { r: number }) | null {
-    const node = this.geometry?.deployments.get(id);
+    const node = this.geometry?.deployments.get(this.nodeId(id));
     return node ? { x: node.disc, y: node.y, r: node.r } : null;
   }
 
@@ -129,7 +135,7 @@ export class SceneRenderer {
   private frame(deltaMs: number): void {
     const { layout, palette } = this.inputs;
     const t = this.clock.time(Date.now());
-    const state = this.timeline.stateAt(t);
+    const state = this.inputs.pastFrame ?? this.timeline.stateAt(t);
     const colors = paletteNumbers(palette);
     this.deltaMs = deltaMs;
     this.seen.clear();
@@ -194,7 +200,7 @@ export class SceneRenderer {
     for (const node of layout.nodes)
       deployments.set(node.id, {
         x: x.bars, disc: x.discs, y: this.value(`dep:${node.id}:y`, node.y), r: this.value(`dep:${node.id}:r`, node.r),
-        band: this.band(`dep:${node.id}`, funnel?.deployments.get(node.id), total, scale),
+        band: this.band(`dep:${node.id}`, nodeFlow(node, funnel), total, scale),
       });
 
     const places = new Map<string, Place>();
@@ -212,7 +218,7 @@ export class SceneRenderer {
 
     const refusedShare = total > 0 ? ((funnel?.refused ?? 0) / total) * scale : 0;
     const refused = {
-      x: x.places, y: this.value("refused:y", layout.refused.y),
+      x: this.value("refused:x", layout.refused.x), y: this.value("refused:y", layout.refused.y),
       band: { handled: 0, throttled: 0, failed: Math.max(0, this.value("refused:f", refusedShare, springs.data)) },
     };
 
@@ -272,6 +278,11 @@ export class SceneRenderer {
     return bucket;
   }
 
+  /** The node that draws a deployment: itself, or its group's idle lane. */
+  private nodeId(id: string): string {
+    return this.inputs.layout.nodeOf.get(id) ?? id;
+  }
+
   /** The path a particle follows between two anchors, entering the LB at its caller's port. */
   private route(g: Geometry, from: Anchor, to: Anchor, caller: string): { path: Path; reverse: boolean } | null {
     const viaLb = (path: Path, key: string) => {
@@ -288,12 +299,14 @@ export class SceneRenderer {
       return path ? { path, reverse: false } : null;
     }
     if (from.kind === "lb" && to.kind === "node") {
-      const path = g.paths.get(to.id);
-      return path ? { path: viaLb(path, to.id), reverse: false } : null;
+      const id = this.nodeId(to.id);
+      const path = g.paths.get(id);
+      return path ? { path: viaLb(path, id), reverse: false } : null;
     }
     if (from.kind === "node" && to.kind === "lb") {
-      const path = g.paths.get(from.id);
-      return path ? { path: viaLb(path, from.id), reverse: true } : null;
+      const id = this.nodeId(from.id);
+      const path = g.paths.get(id);
+      return path ? { path: viaLb(path, id), reverse: true } : null;
     }
     if (from.kind === "lb" && to.kind === "refused") return { path: viaLb(g.refusedPath, "refused"), reverse: false };
     return null;
@@ -301,7 +314,7 @@ export class SceneRenderer {
 
   private point(g: Geometry, anchor: Anchor, inside = 0): Point {
     if (anchor.kind === "node") {
-      const node = g.deployments.get(anchor.id);
+      const node = g.deployments.get(this.nodeId(anchor.id));
       return node ? { x: node.disc - node.r * (1 - inside), y: node.y } : { x: g.lb.x, y: g.lb.y };
     }
     if (anchor.kind === "refused") return { x: g.refused.x, y: g.refused.y };
@@ -357,14 +370,17 @@ export class SceneRenderer {
       } else if (segment.kind === "absorb") {
         if (!this.flashed.has(id) && segment.from.kind === "node") {
           this.flashed.add(id);
-          this.flash(segment.from.id).velocity += 6;
+          this.flash(this.nodeId(segment.from.id)).velocity += 6;
         }
         point = this.point(g, segment.from, 0.3 + 0.7 * progress);
         color = colors.healthy;
         alpha = 1 - progress;
         scale *= 1 - 0.6 * progress;
       } else if (segment.kind === "stream") {
-        if (segment.from.kind === "node") streams.set(segment.from.id, (streams.get(segment.from.id) ?? 0) + 1);
+        if (segment.from.kind === "node") {
+          const node = this.nodeId(segment.from.id);
+          streams.set(node, (streams.get(node) ?? 0) + 1);
+        }
         point = this.point(g, segment.from, 0.3);
         color = colors.healthy;
         alpha = progress > 0.85 ? (1 - progress) / 0.15 : 0.9;
@@ -372,7 +388,7 @@ export class SceneRenderer {
       } else {
         point = this.point(g, segment.from, 1);
         const tone = toneColor(segment.tone, colors);
-        const size = segment.from.kind === "node" ? (g.deployments.get(segment.from.id)?.r ?? 8) : g.barWidth * 1.5;
+        const size = segment.from.kind === "node" ? (g.deployments.get(this.nodeId(segment.from.id))?.r ?? 8) : g.barWidth * 1.5;
         this.bursts.circle(point.x, point.y, size * (1 + 0.9 * easeOutCubic(progress)))
           .stroke({ color: tone, alpha: 0.85 * (1 - progress), width: 2 });
         color = tone;
@@ -469,8 +485,9 @@ export class SceneRenderer {
       if (!item || !place) continue;
       const a = { x: place.end, y: place.ports.get(node.id) ?? place.y };
       const b = { x: item.x - half, y: item.y };
-      const visual = nodeVisual(state?.deployments.get(node.id), state?.throttledSince.get(node.id), t);
-      const deployment = state?.deployments.get(node.id)?.deployment;
+      const lead = node.kind === "fold" ? (worstMember(node.members, state, t)?.id ?? node.id) : node.id;
+      const visual = node.kind === "idle" ? idleVisual : nodeVisual(state?.deployments.get(lead), state?.throttledSince.get(lead), t);
+      const deployment = state?.deployments.get(lead)?.deployment;
       const dim = this.emphasis(`dep:${node.id}`) * (deployment && !this.inputs.nodeFilter(deployment) ? 0.35 : 1);
       if (visual.look === "open" || visual.look === "halfOpen") {
         // An open circuit breaks the last link; a half-open one shows its single probe in the gap.
@@ -526,8 +543,9 @@ export class SceneRenderer {
     for (const node of this.inputs.layout.nodes) {
       const item = g.deployments.get(node.id);
       if (!item) continue;
-      const merged = state?.deployments.get(node.id);
-      const visual = nodeVisual(merged, state?.throttledSince.get(node.id), t);
+      const lead = node.kind === "fold" ? (worstMember(node.members, state, t)?.id ?? node.id) : node.id;
+      const merged = state?.deployments.get(lead);
+      const visual = node.kind === "idle" ? idleVisual : nodeVisual(merged, state?.throttledSince.get(lead), t);
       const width = bandWidth(item.band);
       const filterDim = merged && !this.inputs.nodeFilter(merged.deployment) ? 0.35 : 1;
       const dim = this.emphasis(`dep:${node.id}`) * filterDim;
@@ -540,7 +558,7 @@ export class SceneRenderer {
       const current = this.colorsByNode.get(node.id) ?? target;
       const color = mix(current, target, reducedMotion ? 1 : 0.12);
       this.colorsByNode.set(node.id, color);
-      const faded = visual.look === "open" || visual.look === "halfOpen" ? 0.55 : visual.look === "disabled" || visual.look === "absent" ? 0.5 : 1;
+      const faded = node.kind === "idle" ? 0.5 : visual.look === "open" || visual.look === "halfOpen" ? 0.55 : visual.look === "disabled" || visual.look === "absent" ? 0.5 : 1;
       const alpha = dim * faded;
       const ring = Math.max(1.5, r * 0.2);
       if (visual.look === "degraded") {
@@ -593,7 +611,7 @@ export class SceneRenderer {
     item.request.attempts.forEach((attempt, index) => {
       const last = index === item.request.attempts.length - 1;
       const color = last && item.request.status < 400 ? colors.healthy : attempt.status === 429 ? colors.throttled : colors.failed;
-      stroke(g.paths.get(attempt.deploymentId ?? attempt.deployment), color);
+      stroke(g.paths.get(this.nodeId(attempt.deploymentId ?? attempt.deployment)), color);
     });
   }
 
@@ -647,6 +665,23 @@ export class SceneRenderer {
 }
 
 type Colors = Record<keyof Palette, number>;
+
+/** Idle lanes hold only healthy deployments (a problem never folds), so they draw as a quiet healthy disc. */
+const idleVisual: NodeVisual = { look: "healthy", cooldown: null, cooldownMs: null, probeInMs: null, replicaStates: [] };
+
+/** A node's flow: the deployment's own, or the sum over an idle lane's members. Served and answered stay exact, because a
+ * request ends at one deployment; a request that moved between two idle members of one group is counted at both. */
+function nodeFlow(node: NodeLayout, funnel: Funnel | null): Flow | undefined {
+  if (node.kind === "deployment") return funnel?.deployments.get(node.id);
+  // A folded lane's members share one problem, so their flows add up the same way as an idle lane's.
+  const sum = emptyFlow();
+  for (const id of node.members) {
+    const flow = funnel?.deployments.get(id);
+    if (!flow) continue;
+    for (const key of Object.keys(sum) as (keyof Flow)[]) sum[key] += flow[key];
+  }
+  return sum;
+}
 
 function paletteNumbers(palette: Palette): Colors {
   return Object.fromEntries(Object.entries(palette).map(([key, value]) => [key, hexToNumber(value)])) as Colors;

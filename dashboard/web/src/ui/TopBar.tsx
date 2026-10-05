@@ -1,14 +1,14 @@
 import { AnimatePresence, motion } from "motion/react";
+import recogMark from "../assets/recog-mark.svg?url";
 import type { Connection } from "../data/source";
 import { percent, type Verdict } from "../model/attention";
+import { scenarioLabels } from "../model/demo";
 import type { Funnel } from "../model/funnel";
+import { ranges, spanLabel, type RangeKey } from "../model/history";
+import type { View } from "../model/layout";
 import type { ThemeName } from "../theme";
 
 export interface Filters { model: string; zone: string; caller: string }
-
-/** Funnel windows the operator can choose; each compares with the same window one minute earlier. */
-export const windows = [10, 30, 60] as const;
-export type WindowSeconds = (typeof windows)[number];
 
 interface Props {
   connection: Connection;
@@ -21,22 +21,39 @@ interface Props {
   filters: Filters;
   options: { model: string[]; zone: string[]; caller: string[] };
   onFilters: (filters: Filters) => void;
-  windowSeconds: WindowSeconds;
-  onWindow: (seconds: WindowSeconds) => void;
+  range: RangeKey;
+  /** The window the operator chose, and the seconds of data it actually covers (less near the start of the history). */
+  windowSeconds: number;
+  coveredSeconds: number;
+  onWindow: (seconds: number) => void;
+  /** What the change markers compare with: "a minute earlier", "the window before". */
+  compareLabel: string;
+  view: View;
+  onView: (view: View) => void;
+  /** Set while the playhead is in the past: the figures then describe that window, not now. */
+  viewing: { t: number; windowMs: number; now: number } | null;
+  onGoLive: () => void;
   theme: ThemeName;
   onTheme: () => void;
 }
 
-const scenarioNames: Record<string, string> = {
-  calm: "calm", "sweden-slow": "Sweden slow", "france-throttled": "France throttled", "eastus2-outage": "East US 2 outage", "eu-down": "EU down",
-};
+const time = (value: number, seconds = true) => new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: seconds ? "2-digit" : undefined });
+
+/** "43 min ago", "2 h 5 min ago". */
+function ago(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 1) return `${Math.max(1, Math.round(ms / 1000))} s ago`;
+  if (minutes < 60) return `${minutes} min ago`;
+  return `${Math.floor(minutes / 60)} h${minutes % 60 ? ` ${minutes % 60} min` : ""} ago`;
+}
 
 const STALE_SECONDS = 5;
 const swap = { type: "spring", duration: 0.35, bounce: 0 } as const;
 
 export function TopBar(props: Props) {
-  const { connection, staleSeconds, replicas, verdict, funnel, previous, filters, options, onFilters, windowSeconds, onWindow, theme, onTheme } = props;
-  const status = connection.kind === "demo" ? `Demo: ${scenarioNames[connection.scenario] ?? connection.scenario}`
+  const { connection, staleSeconds, replicas, verdict, funnel, previous, filters, options, onFilters, range, windowSeconds, coveredSeconds, onWindow,
+    compareLabel, view, onView, viewing, onGoLive, theme, onTheme } = props;
+  const status = connection.kind === "demo" ? `Demo: ${scenarioLabels[connection.scenario]}`
     : connection.kind === "live" && staleSeconds >= STALE_SECONDS ? `No data for ${staleSeconds} s. Figures are as of then.`
     : connection.kind === "live" ? (replicas === 0 ? "Connected, no LB replica reporting" : replicas === 1 ? "Live from 1 replica" : `Live from ${replicas} replicas`)
     : connection.kind === "connecting" ? "Connecting to the stream"
@@ -49,6 +66,7 @@ export function TopBar(props: Props) {
     <header className="top">
       <div className="toolbar">
         <div className="brand">
+          <img className="brand-mark" src={recogMark} alt="Recog" />
           <h1>Load balancer</h1>
           <p className="connection" data-kind={connection.kind} data-stale={staleSeconds >= STALE_SECONDS || undefined} role="status">{status}</p>
         </div>
@@ -62,10 +80,17 @@ export function TopBar(props: Props) {
               </select>
             </label>
           ))}
-          <div className="segmented" role="radiogroup" aria-label="Window for traffic shares">
-            {windows.map((seconds) => (
+          <div className="segmented" role="radiogroup" aria-label="Group the funnel">
+            {(["region", "model"] as const).map((item) => (
+              <button key={item} type="button" role="radio" aria-checked={item === view} onClick={() => onView(item)}>
+                {item === "region" ? "By region" : "By model"}
+              </button>
+            ))}
+          </div>
+          <div className="segmented" role="radiogroup" aria-label="Window the figures cover">
+            {ranges[range].windows.map((seconds) => (
               <button key={seconds} type="button" role="radio" aria-checked={seconds === windowSeconds} onClick={() => onWindow(seconds)}>
-                {seconds === 60 ? "1 min" : `${seconds} s`}
+                {spanLabel(seconds)}
               </button>
             ))}
           </div>
@@ -76,6 +101,19 @@ export function TopBar(props: Props) {
           </button>
         </div>
       </div>
+      {/* In the past, a band above the verdict says so; the verdict and figures then describe that window. */}
+      <AnimatePresence initial={false}>
+        {viewing && (
+          <motion.div className="viewing" role="status" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }} transition={swap}>
+            <div className="viewing-inner">
+              <span className="viewing-mark" aria-hidden="true" />
+              <span><strong>Not live.</strong> Showing {time(viewing.t - viewing.windowMs, viewing.windowMs < 3_600_000)}–{time(viewing.t, viewing.windowMs < 3_600_000)}, {ago(viewing.now - viewing.t)}.</span>
+              <button type="button" onClick={onGoLive}>Back to live</button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       {/* The verdict and the figures that size it read as one line: what is wrong, then how much it costs. */}
       <div className="headline">
         <div className="verdict" data-tone={verdict.tone} data-kind={verdict.kind ?? undefined} aria-live="polite">
@@ -97,7 +135,8 @@ export function TopBar(props: Props) {
             <Kpi label="Requests" value={rate(funnel)} before={rate(previous)} format={(v) => `${v.toFixed(v < 10 ? 1 : 0)}/s`} unit="rate" />
           </dl>
           <p id="kpi-caption" className="kpi-caption">
-            Last {windowSeconds === 60 ? "minute" : `${windowSeconds} s`}{previous ? ", change against a minute earlier" : ". Changes appear once a minute of history is in."}
+            {viewing ? `${spanLabel(coveredSeconds)} to ${time(viewing.t)}` : `Last ${spanLabel(coveredSeconds)}`}
+            {previous ? `, change against ${compareLabel}` : `. Changes appear once ${compareLabel} is retained.`}
           </p>
         </div>
       </div>

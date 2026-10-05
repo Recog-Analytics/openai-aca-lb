@@ -1,4 +1,4 @@
-import type { DashboardFrame, DashboardRoute, DeploymentRate, FrameKind, MergedDeployment, RequestRecord } from "./types";
+import type { DashboardFrame, DashboardRoute, DeploymentRate, FrameKind, MergedDeployment, RequestRecord, SummaryBucket } from "./types";
 
 /** Scene time lags server time so late batches still play in completion order. */
 export const PLAYBACK_LAG_MS = 2500;
@@ -12,10 +12,14 @@ export interface TimedRequest {
   completedAt: number;
 }
 
-/** Unsampled route counts of one server tick: requests that completed in the second before `at`. */
+/**
+ * Unsampled route counts of requests that completed in the `seconds` before `at`: one second for a live tick, a whole
+ * bucket for history.
+ */
 export interface Tick {
   at: number;
   routes: DashboardRoute[];
+  seconds?: number;
 }
 
 export interface FrameState {
@@ -51,6 +55,11 @@ export class Timeline {
   frames: FrameState[] = [];
   requests: TimedRequest[] = [];
   ticks: Tick[] = [];
+  /** Per-minute totals of the retained day, oldest first. */
+  summary: SummaryBucket[] = [];
+  /** Earliest server times with per-second and per-minute history; null until the service says. */
+  retention: { seconds: number; minutes: number } | null = null;
+  replicaNumbers: Record<string, number> = {};
   /** Server time minus client time, from the latest frame. */
   clockOffset = 0;
   version = 0;
@@ -82,6 +91,19 @@ export class Timeline {
     else this.frames.push(state);
     for (const tick of frame.routeHistory ?? []) this.addTick(parseTime(tick.at), tick.routes);
     if (kind === "delta") this.addTick(at, frame.routes ?? []);
+    if (frame.replicaNumbers) this.replicaNumbers = frame.replicaNumbers;
+    const secondsFrom = parseTime(frame.retention?.secondsFrom);
+    const minutesFrom = parseTime(frame.retention?.minutesFrom);
+    if (secondsFrom !== null && minutesFrom !== null) this.retention = { seconds: secondsFrom, minutes: minutesFrom };
+    if (kind === "snapshot" && frame.summary) this.summary = [...frame.summary];
+    else for (const bucket of frame.summary ?? []) {
+      const time = parseTime(bucket.at);
+      const last = parseTime(this.summary.at(-1)?.at);
+      if (time !== null && (last === null || time > last)) this.summary.push(bucket);
+    }
+    const dayAgo = at - 24 * 3600_000;
+    const stale = this.summary.findIndex((bucket) => (parseTime(bucket.at) ?? 0) > dayAgo);
+    if (stale > 0) this.summary.splice(0, stale);
 
     const playhead = at - PLAYBACK_LAG_MS;
     const added: TimedRequest[] = [];
@@ -107,6 +129,8 @@ export class Timeline {
     this.frames = [];
     this.requests = [];
     this.ticks = [];
+    this.summary = [];
+    this.retention = null;
     this.ids.clear();
     this.version++;
   }

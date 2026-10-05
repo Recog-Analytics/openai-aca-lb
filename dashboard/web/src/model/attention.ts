@@ -26,8 +26,8 @@ const kindRank: Record<IssueKind, number> = { down: 0, open: 1, probing: 2, thro
 function place(items: DashboardDeployment[]): string {
   const first = items[0];
   if (!first) return "Unknown";
-  const regions = new Set(items.map((item) => item.region));
-  const name = regions.size === 1 ? regionName(first.region) : first.account;
+  const regions = [...new Set(items.map((item) => regionName(item.region)))];
+  const name = regions.join(" and ");
   return items.every((item) => item.tier === 2) ? `Global ${name}` : items.every((item) => item.tier === 0) ? `${name} PTU` : name;
 }
 
@@ -35,14 +35,16 @@ function zonesOf(items: DashboardDeployment[]): string[] {
   return [...new Set(items.map((item) => item.zone))];
 }
 
-function models(items: DashboardDeployment[]): string {
-  return [...new Set(items.map((item) => modelShort(item.modelKey)))].join(" and ");
+/** "gpt-4o-mini and gpt-4o-mini · public"; past three, "a, b and 4 more models". */
+function models(items: DashboardDeployment[], labels: Map<string, string>): string {
+  const names = [...new Set(items.map((item) => labels.get(item.id) ?? modelShort(item.modelKey)))];
+  return names.length <= 3 ? names.join(" and ") : `${names.slice(0, 2).join(", ")} and ${names.length - 2} more models`;
 }
 
 const seconds = (ms: number | null) => (ms === null ? null : Math.max(1, Math.ceil(ms / 1000)));
 
 /** Problems in the frame at time `t`, worst first. */
-export function findIssues(frame: FrameState | null, funnel: Funnel, t: number): Issue[] {
+export function findIssues(frame: FrameState | null, funnel: Funnel, t: number, labels: Map<string, string> = new Map()): Issue[] {
   if (!frame) return [];
   const all = [...frame.deployments.values()];
   const byAccount = new Map<string, typeof all>();
@@ -73,7 +75,7 @@ export function findIssues(frame: FrameState | null, funnel: Funnel, t: number):
       const ids = deployments.map((item) => item.id);
       issues.push({
         key: `${account}:down`, kind: "down", tone: "critical", title: `${place(deployments)} is down`,
-        detail: `${account} is unreachable, so the LB skips all ${deployments.length === 1 ? "its deployment" : `${deployments.length} of its deployments`}. ` +
+        detail: `Its account is unreachable, so the LB skips ${deployments.length === 1 ? "its deployment" : `all ${deployments.length} of its deployments`}. ` +
           (probing ? "Probing now." : Number.isFinite(probe) ? `Next probe in ${seconds(probe)} s.` : "Waiting to probe."),
         deploymentIds: ids, zones: zonesOf(deployments), movedOn: movedOn(ids),
       });
@@ -90,11 +92,12 @@ export function findIssues(frame: FrameState | null, funnel: Funnel, t: number):
       const group = entries.map((entry) => entry.item.deployment);
       const ids = group.map((item) => item.id);
       // One model reads "Sweden Central gpt-4o"; several share the account's name and are listed in the detail.
-      const name = group.length === 1 ? `${place(group)} ${models(group)}` : place(group);
+      const name = group.length === 1 ? `${place(group)} ${models(group, labels)}` : place(group);
+      // Distinct LB replicas, not replica reports: four deployments seen by two replicas is still two replicas.
       const replicas = (() => {
-        const states = entries.flatMap((entry) => entry.item.replicas);
-        const affected = states.filter((replica) => replica.state !== "Healthy").length;
-        return states.length > 1 && affected < states.length ? ` Seen by ${affected} of ${states.length} replicas.` : "";
+        const all = new Set(entries.flatMap((entry) => entry.item.replicas.map((replica) => replica.replica)));
+        const affected = new Set(entries.flatMap((entry) => entry.item.replicas.filter((replica) => replica.state !== "Healthy").map((replica) => replica.replica)));
+        return all.size > 1 && affected.size < all.size ? ` Seen by ${affected.size} of ${all.size} LB replicas.` : "";
       })();
       if (kind === "throttled") {
         const cooldown = Math.max(...entries.map((entry) => entry.visual.cooldownMs ?? 0));
@@ -102,7 +105,8 @@ export function findIssues(frame: FrameState | null, funnel: Funnel, t: number):
           detail: `Answering 429, so the LB sends its share elsewhere${cooldown > 0 ? ` for ${seconds(cooldown)} s more` : ""}.${servedVersusWeight(group)}${replicas}`,
           deploymentIds: ids, zones: zonesOf(group), movedOn: movedOn(ids) });
       } else if (kind === "slow") {
-        const p95 = group.map((item) => `${group.length > 1 ? `${modelShort(item.modelKey)} ` : ""}${durationLabel(item.p95TtfbMs)}`).join(", ");
+        const p95 = group.length > 3 ? `up to ${durationLabel(Math.max(...group.map((item) => item.p95TtfbMs ?? 0)))}`
+          : group.map((item) => `${group.length > 1 ? `${labels.get(item.id) ?? modelShort(item.modelKey)} ` : ""}${durationLabel(item.p95TtfbMs)}`).join(", ");
         issues.push({ key: `${account}:${kind}`, kind, tone: "warning", title: `${name} is slow`,
           detail: `p95 time to first byte ${p95}, over twice its peers. The LB ranks it last and sends it only probes.${servedVersusWeight(group)}`,
           deploymentIds: ids, zones: zonesOf(group), movedOn: movedOn(ids) });
