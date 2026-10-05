@@ -7,13 +7,14 @@ param containerAppsEnvironmentName string
 param containerRegistryName string
 param identityName string
 param identityClientId string
-param logAnalyticsWorkspaceName string
 param discoveryScopes array
 param keyVaultUri string
 param callersFileSecretName string
 param overridesFileSecretName string
 param slackWebhookSecretName string = ''
 param imageName string = ''
+param dashboardIngestUrl string
+param dashboardAudience string
 
 var configurationPath = '/mnt/lb-config'
 var discoveryEnvironment = [for (discoveryScope, index) in discoveryScopes: {
@@ -45,27 +46,6 @@ var slackEnvironment = empty(slackWebhookSecretName) ? [] : [
     secretRef: 'lb-slack-webhook'
   }
 ]
-
-module containerRegistry 'core/host/container-registry.bicep' = {
-  name: containerRegistryName
-  params: {
-    name: containerRegistryName
-    location: location
-    tags: tags
-  }
-}
-
-module containerApps 'core/host/container-apps.bicep' = {
-  name: 'container-apps'
-  params: {
-    name: 'app'
-    location: location
-    containerAppsEnvironmentName: containerAppsEnvironmentName
-    containerRegistryName: containerRegistryName
-    logAnalyticsWorkspaceName: logAnalyticsWorkspaceName
-  }
-  dependsOn: [containerRegistry]
-}
 
 module app 'core/host/container-app.bicep' = {
   name: '${deployment().name}-update'
@@ -145,12 +125,16 @@ module app 'core/host/container-app.bicep' = {
         name: 'Discovery__OverridesFilePath'
         value: '${configurationPath}/overrides.yaml'
       }
+      {
+        name: 'Dashboard__IngestUrl'
+        value: dashboardIngestUrl
+      }
+      {
+        name: 'Dashboard__Audience'
+        value: dashboardAudience
+      }
     ], discoveryEnvironment, slackEnvironment)
   }
-  dependsOn: [
-    containerApps
-    containerRegistry
-  ]
 }
 
 resource applicationInsights 'Microsoft.Insights/components@2020-02-02' existing = {
@@ -162,5 +146,4 @@ resource userIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-
 }
 
 output SERVICE_WEB_NAME string = app.outputs.name
-output AZURE_REGISTRY_NAME string = containerRegistry.outputs.name
 output uri string = app.outputs.uri

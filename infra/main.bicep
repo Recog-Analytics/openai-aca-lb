@@ -21,6 +21,9 @@ param slackWebhookSecretName string = ''
 @description('Prebuilt proxy image. Empty uses a placeholder until the azd postprovision hook deploys the proxy.')
 param imageName string = ''
 
+@description('Prebuilt dashboard image. Empty uses a placeholder until the azd postprovision hook deploys the dashboard.')
+param dashboardImageName string = ''
+
 @description('SKU name for OpenAI.')
 param openAiSkuName string = 'S0'
 
@@ -116,6 +119,16 @@ module managedIdentity 'core/security/managed-identity.bicep' = {
   }
 }
 
+module dashboardIdentity 'core/security/managed-identity.bicep' = {
+  name: 'dashboard-identity'
+  scope: resourceGroup
+  params: {
+    name: '${abbrs.managedIdentityUserAssignedIdentities}dashboard-${resourceToken}'
+    location: location
+    tags: tags
+  }
+}
+
 module subscriptionDiscoveryAccess 'core/security/discovery-subscription-access.bicep' = [for subscriptionId in parentSubscriptions: {
   name: 'discovery-sub-${uniqueString(subscriptionId)}'
   scope: subscription(subscriptionId)
@@ -142,6 +155,37 @@ module configurationAccess 'core/security/configuration-access.bicep' = {
   }
 }
 
+module containerApps 'core/host/container-apps.bicep' = {
+  name: 'container-apps'
+  scope: resourceGroup
+  params: {
+    name: 'app'
+    location: location
+    tags: tags
+    containerAppsEnvironmentName: '${prefix}-containerapps-env'
+    containerRegistryName: '${replace(prefix, '-', '')}registry'
+    logAnalyticsWorkspaceName: monitoring.outputs.logAnalyticsWorkspaceName
+  }
+}
+
+// Live routing dashboard. The LB publishes to it with its managed identity.
+module dashboard 'dashboard.bicep' = {
+  name: 'dashboard'
+  scope: resourceGroup
+  params: {
+    name: replace('${take(prefix, 19)}-dash', '--', '-')
+    location: location
+    tags: tags
+    containerAppsEnvironmentName: containerApps.outputs.environmentName
+    containerRegistryName: containerApps.outputs.registryName
+    identityName: dashboardIdentity.outputs.managedIdentityName
+    lbIdentityPrincipalId: managedIdentity.outputs.managedIdentityPrincipalId
+    lbIdentityClientId: managedIdentity.outputs.managedIdentityClientId
+    appRegistrationName: '${name}-dashboard-${resourceToken}'
+    imageName: dashboardImageName
+  }
+}
+
 // Web frontend
 module web 'web.bicep' = {
   name: 'web'
@@ -151,17 +195,18 @@ module web 'web.bicep' = {
     location: location
     tags: tags
     applicationInsightsName: monitoring.outputs.applicationInsightsName
-    logAnalyticsWorkspaceName: monitoring.outputs.logAnalyticsWorkspaceName
     identityName: managedIdentity.outputs.managedIdentityName
     identityClientId: managedIdentity.outputs.managedIdentityClientId
-    containerAppsEnvironmentName: '${prefix}-containerapps-env'
-    containerRegistryName: '${replace(prefix, '-', '')}registry'
+    containerAppsEnvironmentName: containerApps.outputs.environmentName
+    containerRegistryName: containerApps.outputs.registryName
     discoveryScopes: effectiveDiscoveryScopes
     keyVaultUri: configurationAccess.outputs.keyVaultUri
     callersFileSecretName: callersFileSecretName
     overridesFileSecretName: overridesFileSecretName
     slackWebhookSecretName: slackWebhookSecretName
     imageName: imageName
+    dashboardIngestUrl: '${dashboard.outputs.uri}/ingest'
+    dashboardAudience: dashboard.outputs.clientId
   }
   dependsOn: [
     subscriptionDiscoveryAccess
@@ -212,5 +257,7 @@ module openAis 'core/ai/cognitiveservices.bicep' = [for (config, i) in items(ope
 
 output CONTAINER_APP_URL string =web.outputs.uri
 output SERVICE_WEB_NAME string = web.outputs.SERVICE_WEB_NAME
-output AZURE_REGISTRY_NAME string =web.outputs.AZURE_REGISTRY_NAME
+output DASHBOARD_URL string = dashboard.outputs.uri
+output SERVICE_DASHBOARD_NAME string = dashboard.outputs.name
+output AZURE_REGISTRY_NAME string = containerApps.outputs.registryName
 output RESOURCE_GROUP_NAME string =resourceGroup.name
