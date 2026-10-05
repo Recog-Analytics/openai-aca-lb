@@ -11,22 +11,25 @@ public sealed record RouteTick(DateTimeOffset At, IReadOnlyList<DashboardRoute> 
 
 /// <summary>
 /// One SSE frame. <see cref="Routes"/> holds this tick's unsampled route counts; only the snapshot fills
-/// <see cref="RouteHistory"/> with the retained ticks, so a new browser can show traffic shares at once.
+/// <see cref="RouteHistory"/> with the last two minutes of ticks, so a new browser can show traffic shares at once.
+/// The snapshot's <see cref="Summary"/> holds every retained minute; a delta carries only the minute its tick closed.
 /// </summary>
 public sealed record DashboardFrame(DateTimeOffset At, IReadOnlyList<string> Replicas,
     IReadOnlyList<MergedDeployment> Deployments, IReadOnlyList<RequestRecord> Requests, IReadOnlyList<DeploymentRate> Counts,
-    IReadOnlyList<DashboardRoute> Routes, IReadOnlyList<RouteTick> RouteHistory);
+    IReadOnlyList<DashboardRoute> Routes, IReadOnlyList<RouteTick> RouteHistory, IReadOnlyList<SummaryBucket> Summary,
+    HistoryRetention Retention, IReadOnlyDictionary<string, int> ReplicaNumbers);
 
 public sealed class DashboardStore(TimeProvider clock)
 {
     private readonly Lock gate = new();
+    private static readonly TimeSpan Recent = TimeSpan.FromMinutes(2);
     private readonly Dictionary<string, ReplicaState> replicas = new(StringComparer.Ordinal);
-    private readonly Queue<(DateTimeOffset ReceivedAt, RequestRecord Request)> history = new();
+    private readonly Dictionary<string, int> numbers = new(StringComparer.Ordinal);
+    private readonly DashboardHistory history = new();
     private readonly List<RequestRecord> pending = [];
     private long pendingSeen;
     private readonly Dictionary<(string DeploymentId, string Outcome), long> counts = new();
     private readonly Dictionary<string, DashboardRoute> routes = new(StringComparer.Ordinal);
-    private readonly Queue<RouteTick> routeHistory = new();
     private readonly HashSet<Channel<DashboardFrame>> subscribers = [];
     private DateTimeOffset lastTick = clock.GetUtcNow();
     private IReadOnlyList<DeploymentRate> lastRates = [];
@@ -39,9 +42,15 @@ public sealed class DashboardStore(TimeProvider clock)
             Prune(now);
             if (!replicas.TryGetValue(batch.Replica, out var previous) || batch.SentAt >= previous.SentAt)
                 replicas[batch.Replica] = new(now, batch.SentAt, batch.State);
+            if (!numbers.ContainsKey(batch.Replica))
+            {
+                // The lowest number no other known replica holds, kept while the replica is known.
+                var used = numbers.Values.ToHashSet();
+                numbers[batch.Replica] = Enumerable.Range(1, used.Count + 1).First(number => !used.Contains(number));
+            }
             foreach (var request in batch.Requests)
             {
-                history.Enqueue((now, request));
+                history.Add(now, request);
                 // Reservoir sampling bounds pending events across all replicas between ticks.
                 pendingSeen++;
                 if (pending.Count < 100)
@@ -72,7 +81,7 @@ public sealed class DashboardStore(TimeProvider clock)
         {
             var now = clock.GetUtcNow();
             Prune(now);
-            return Frame(now, history.Select(item => item.Request).ToArray(), [], routeHistory.ToArray());
+            return Frame(now, Merge(), history.Requests(now, Recent), [], history.Ticks(now, Recent), history.Summary());
         }
     }
 
@@ -86,9 +95,10 @@ public sealed class DashboardStore(TimeProvider clock)
             lastRates = counts.Select(pair => new DashboardCount(pair.Key.DeploymentId, pair.Key.Outcome, pair.Value))
                 .GroupBy(item => item.DeploymentId, StringComparer.OrdinalIgnoreCase)
                 .Select(group => new DeploymentRate(group.Key, group.Sum(item => item.Count) / seconds, group.ToArray())).ToArray();
-            var tick = new RouteTick(now, routes.Values.ToArray());
-            routeHistory.Enqueue(tick);
-            var frame = Frame(now, pending.ToArray(), tick.Routes, []);
+            var deployments = Merge();
+            var tickRoutes = routes.Values.ToArray();
+            var closed = history.Tick(now, tickRoutes, deployments);
+            var frame = Frame(now, deployments, pending.ToArray(), tickRoutes, [], closed == null ? [] : [closed]);
             pending.Clear();
             pendingSeen = 0;
             counts.Clear();
@@ -97,6 +107,16 @@ public sealed class DashboardStore(TimeProvider clock)
             foreach (var subscriber in subscribers)
                 subscriber.Writer.TryWrite(frame);
             return frame;
+        }
+    }
+
+    public HistoryResponse History(DateTimeOffset from, DateTimeOffset to, int resolution)
+    {
+        lock (gate)
+        {
+            var now = clock.GetUtcNow();
+            Prune(now);
+            return history.Query(now, from, to, resolution);
         }
     }
 
@@ -125,17 +145,19 @@ public sealed class DashboardStore(TimeProvider clock)
     private void Prune(DateTimeOffset now)
     {
         foreach (var replica in replicas.Where(pair => now - pair.Value.ReceivedAt >= TimeSpan.FromSeconds(30)).Select(pair => pair.Key).ToArray())
+        {
             replicas.Remove(replica);
-        while (history.TryPeek(out var item) && now - item.ReceivedAt >= TimeSpan.FromMinutes(2))
-            history.Dequeue();
-        while (routeHistory.TryPeek(out var tick) && now - tick.At >= TimeSpan.FromMinutes(2))
-            routeHistory.Dequeue();
+            numbers.Remove(replica);
+        }
+        history.Prune(now);
     }
 
-    private DashboardFrame Frame(DateTimeOffset now, IReadOnlyList<RequestRecord> requests,
-        IReadOnlyList<DashboardRoute> tickRoutes, IReadOnlyList<RouteTick> ticks)
-    {
-        var deployments = replicas.SelectMany(replica => replica.Value.State.Deployments.Select(deployment =>
+    private DashboardFrame Frame(DateTimeOffset now, IReadOnlyList<MergedDeployment> deployments, IReadOnlyList<RequestRecord> requests,
+        IReadOnlyList<DashboardRoute> tickRoutes, IReadOnlyList<RouteTick> ticks, IReadOnlyList<SummaryBucket> summary) =>
+        new(now, replicas.Keys.OrderBy(replica => numbers[replica]).ToArray(), deployments, requests, lastRates, tickRoutes, ticks, summary,
+            history.Retention(now), new Dictionary<string, int>(numbers, StringComparer.Ordinal));
+
+    private IReadOnlyList<MergedDeployment> Merge() => replicas.SelectMany(replica => replica.Value.State.Deployments.Select(deployment =>
             (Replica: replica.Key, Deployment: deployment)))
             .GroupBy(item => item.Deployment.Id, StringComparer.OrdinalIgnoreCase)
             .Select(group =>
@@ -144,10 +166,8 @@ public sealed class DashboardStore(TimeProvider clock)
                 var p95 = group.Max(item => item.Deployment.P95TtfbMs);
                 return new MergedDeployment(worst with { P95TtfbMs = p95, AccountOpen = group.Any(item => item.Deployment.AccountOpen) },
                     group.Select(item => new ReplicaDeployment(item.Replica, item.Deployment.State,
-                        item.Deployment.P95TtfbMs, item.Deployment.AccountOpen)).OrderBy(item => item.Replica).ToArray());
+                        item.Deployment.P95TtfbMs, item.Deployment.AccountOpen)).OrderBy(item => numbers[item.Replica]).ToArray());
             }).OrderBy(item => item.Deployment.Id, StringComparer.OrdinalIgnoreCase).ToArray();
-        return new(now, replicas.Keys.Order().ToArray(), deployments, requests, lastRates, tickRoutes, ticks);
-    }
 
     public static int Severity(string state) => state switch
     {

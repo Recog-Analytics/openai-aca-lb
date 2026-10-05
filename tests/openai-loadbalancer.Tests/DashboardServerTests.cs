@@ -160,6 +160,136 @@ public class DashboardServerTests
         Assert.DoesNotContain("devkit-token", delta.Data);
     }
 
+    [Fact]
+    public async Task HistoryUsesBrowserAuthAndIngestStillRequiresTheLbIdentity()
+    {
+        await using var app = Create("Production", false);
+        await app.StartAsync();
+        using var client = Client(app);
+        const string query = "/api/history?from=2026-10-04T00:00:00Z&to=2026-10-04T01:00:00Z&resolution=60";
+        using var anonymous = await client.GetAsync(query);
+        Assert.Equal(HttpStatusCode.Redirect, anonymous.StatusCode);
+        using var browser = new HttpRequestMessage(HttpMethod.Get, query);
+        browser.Headers.Add("X-MS-CLIENT-PRINCIPAL", Principal(OtherId));
+        using var response = await client.SendAsync(browser);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var ingest = Ingest("Bearer token");
+        ingest.Headers.Add("X-MS-CLIENT-PRINCIPAL", Principal(OtherId));
+        using var forbidden = await client.SendAsync(ingest);
+        Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("to=2026-10-04T01:00:00Z&resolution=60")]
+    [InlineData("from=yesterday&to=2026-10-04T01:00:00Z&resolution=60")]
+    [InlineData("from=2026-10-04T00:00:00Z&to=2026-10-04T01:00:00Z&resolution=7")]
+    [InlineData("from=2026-10-04T00:00:00Z&to=2026-10-04T01:00:00Z&resolution=-60")]
+    [InlineData("from=2026-10-04T00:00:00Z&to=2026-10-04T01:00:00Z&resolution=abc")]
+    [InlineData("from=2026-10-04T01:00:00Z&to=2026-10-04T01:00:00Z&resolution=60")]
+    [InlineData("from=2026-10-04T02:00:00Z&to=2026-10-04T01:00:00Z&resolution=60")]
+    [InlineData("from=2026-10-04T00:00:00Z&to=2026-10-04T01:00:00Z&resolution=1")]
+    [InlineData("from=2026-10-03T00:00:00Z&to=2026-10-04T01:00:00Z&resolution=30")]
+    public async Task HistoryRejectsInvalidParameters(string query)
+    {
+        await using var app = Create("Development", true);
+        await app.StartAsync();
+        using var client = Client(app);
+        using var response = await client.GetAsync("/api/history?" + query);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task HistoryReturnsCompressedBucketsOfIngestedRoutes()
+    {
+        var clock = new TestClock();
+        await using var app = Create("Development", true, clock);
+        await app.StartAsync();
+        using var client = Client(app);
+        var start = clock.GetUtcNow();
+        using var ingest = Ingest("Bearer devkit-token");
+        ingest.Content = JsonContent.Create(DashboardStoreTests.Batch(clock, "one", "Open") with
+        {
+            Requests = [DashboardStoreTests.Request("observed") with { Operation = "chat.completions", ApiVersion = "2024-10-21" }],
+            Routes = [new("dev", "gpt-4o@1", "eu", 200, [new("deployment", "Success")], 7)]
+        });
+        (await client.SendAsync(ingest)).EnsureSuccessStatusCode();
+        await clock.TimerCreated.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        clock.Advance(TimeSpan.FromSeconds(1));
+        var store = app.Services.GetRequiredService<DashboardStore>();
+        using var request = new HttpRequestMessage(HttpMethod.Get,
+            $"/api/history?from={Uri.EscapeDataString(start.ToString("O"))}&to={Uri.EscapeDataString(start.AddMinutes(1).ToString("O"))}&resolution=10");
+        request.Headers.AcceptEncoding.ParseAdd("gzip");
+        while (store.History(start, start.AddMinutes(1), 10).Buckets.Count == 0)
+            await Task.Delay(10);
+        using var response = await client.SendAsync(request);
+        {
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Contains("gzip", response.Content.Headers.ContentEncoding);
+            await using var body = new System.IO.Compression.GZipStream(await response.Content.ReadAsStreamAsync(), System.IO.Compression.CompressionMode.Decompress);
+            using var json = await JsonDocument.ParseAsync(body);
+            Assert.Equal(10, json.RootElement.GetProperty("resolution").GetInt32());
+            var bucket = Assert.Single(json.RootElement.GetProperty("buckets").EnumerateArray());
+            Assert.Equal(start.AddSeconds(10), bucket.GetProperty("at").GetDateTimeOffset());
+            Assert.Equal(7, Assert.Single(bucket.GetProperty("routes").EnumerateArray()).GetProperty("count").GetInt64());
+            var state = Assert.Single(bucket.GetProperty("states").EnumerateArray());
+            Assert.Equal("Open", state.GetProperty("state").GetString());
+            Assert.Equal("deployment", state.GetProperty("deploymentId").GetString());
+            var observed = Assert.Single(json.RootElement.GetProperty("requests").EnumerateArray());
+            Assert.Equal("chat.completions", observed.GetProperty("operation").GetString());
+            Assert.Equal("Open", Assert.Single(json.RootElement.GetProperty("deployments").EnumerateArray())
+                .GetProperty("deployment").GetProperty("state").GetString());
+        }
+    }
+
+    [Theory]
+    [InlineData("operation", 33)]
+    [InlineData("apiVersion", 33)]
+    [InlineData("errorCode", 65)]
+    [InlineData("errorMessage", 302)]
+    [InlineData("backendRequestId", 129)]
+    public async Task IngestBoundsRequestContextFields(string field, int length)
+    {
+        await using var app = Create("Development", true);
+        await app.StartAsync();
+        using var client = Client(app);
+        var value = new string('x', length);
+        var record = DashboardStoreTests.Request("long");
+        record = field switch
+        {
+            "operation" => record with { Operation = value },
+            "apiVersion" => record with { ApiVersion = value },
+            "errorCode" => record with { Attempts = [record.Attempts[0] with { ErrorCode = value }] },
+            "errorMessage" => record with { Attempts = [record.Attempts[0] with { ErrorMessage = value }] },
+            _ => record with { Attempts = [record.Attempts[0] with { BackendRequestId = value }] }
+        };
+        using var rejected = Ingest("Bearer devkit-token");
+        rejected.Content = JsonContent.Create(DashboardStoreTests.Batch(TimeProvider.System, "one", "Healthy") with { Requests = [record] });
+        using var response = await client.SendAsync(rejected);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var shorter = new string('x', length - 1);
+        using var accepted = Ingest("Bearer devkit-token");
+        accepted.Content = new StringContent(JsonSerializer.Serialize(DashboardStoreTests.Batch(TimeProvider.System, "one", "Healthy") with { Requests = [record] },
+            new JsonSerializerOptions(JsonSerializerDefaults.Web)).Replace(value, shorter), Encoding.UTF8, "application/json");
+        using var ok = await client.SendAsync(accepted);
+        Assert.Equal(HttpStatusCode.Accepted, ok.StatusCode);
+    }
+
+    [Fact]
+    public async Task IngestRejectsRouteIdentifiersTheHistoryWouldHaveToCut()
+    {
+        await using var app = Create("Development", true);
+        await app.StartAsync();
+        using var client = Client(app);
+        var batch = DashboardStoreTests.Batch(TimeProvider.System, "one", "Healthy");
+        DashboardRoute Route(string id) => new("caller", "m@1", "eu", 200, [new DashboardHop(id, "Success")], 1);
+        using var tooLong = Ingest("Bearer devkit-token");
+        tooLong.Content = JsonContent.Create(batch with { Routes = [Route(new string('x', DashboardHistory.MaxText + 1))] });
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.SendAsync(tooLong)).StatusCode);
+        using var armLength = Ingest("Bearer devkit-token");
+        armLength.Content = JsonContent.Create(batch with { Routes = [Route(new string('x', 200))] });
+        Assert.Equal(HttpStatusCode.Accepted, (await client.SendAsync(armLength)).StatusCode);
+    }
+
     private static WebApplication Create(string environment, bool devAuth, TimeProvider? clock = null, string lbId = LbId) =>
         DashboardHost.Create(["--environment", environment], builder =>
         {
