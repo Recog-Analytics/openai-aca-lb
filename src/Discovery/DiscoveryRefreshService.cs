@@ -21,7 +21,7 @@ public sealed class DiscoveryRefreshService(
         try
         {
             await RefreshAsync(stoppingToken);
-            using var timer = new PeriodicTimer(TimeSpan.FromMinutes(5), timeProvider);
+            using var timer = new PeriodicTimer(options.Value.RefreshInterval, timeProvider);
             while (await timer.WaitForNextTickAsync(stoppingToken))
                 await RefreshAsync(stoppingToken);
         }

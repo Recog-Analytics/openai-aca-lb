@@ -10,8 +10,10 @@ namespace openai_loadbalancer.Tests;
 
 public class DiscoveryHostingTests
 {
-    [Fact]
-    public async Task AnonymousReadinessRecoversOnFiveMinuteRefreshWhileHealthStaysHealthy()
+    [Theory]
+    [InlineData(null, 300)]
+    [InlineData("00:00:05", 5)]
+    public async Task AnonymousReadinessRecoversOnConfiguredRefreshWhileHealthStaysHealthy(string? interval, int intervalSeconds)
     {
         using var fixture = new DiscoveryRefreshTests.Fixture();
         fixture.Arm.Failure = new HttpRequestException("ARM unavailable");
@@ -28,6 +30,8 @@ public class DiscoveryHostingTests
             ["Discovery:OverridesFilePath"] = fixture.Options.OverridesFilePath,
             ["Discovery:CallersFilePath"] = fixture.Options.CallersFilePath
         });
+        if (interval != null)
+            builder.Configuration["Discovery:RefreshInterval"] = interval;
         builder.Services.AddDiscovery(builder.Configuration);
         builder.Services.AddSingleton<IArmClient>(fixture.Arm);
         builder.Services.AddSingleton<TimeProvider>(fixture.Clock);
@@ -46,16 +50,16 @@ public class DiscoveryHostingTests
         Assert.Equal(HttpStatusCode.OK, healthy.StatusCode);
 
         fixture.Arm.Failure = null;
-        fixture.Clock.Advance(TimeSpan.FromMinutes(4));
+        fixture.Clock.Advance(TimeSpan.FromSeconds(intervalSeconds - 1));
         Assert.False(state.IsReady);
-        fixture.Clock.Advance(TimeSpan.FromMinutes(1));
+        fixture.Clock.Advance(TimeSpan.FromSeconds(1));
         await WaitUntilAsync(() => state.IsReady);
         using var ready = await http.GetAsync("/readyz");
         Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
 
         var snapshot = state.Current;
         fixture.Arm.Failure = new HttpRequestException("ARM unavailable again");
-        fixture.Clock.Advance(TimeSpan.FromMinutes(5));
+        fixture.Clock.Advance(TimeSpan.FromSeconds(intervalSeconds));
         await WaitUntilAsync(() => fixture.Logger.Entries.Count(entry => entry.Level == LogLevel.Error) == 2);
         // A failed refresh must not clear readiness or replace the snapshot.
         using var stillReady = await http.GetAsync("/readyz");

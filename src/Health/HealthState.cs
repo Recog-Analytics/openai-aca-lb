@@ -8,7 +8,7 @@ public enum DeploymentHealth { Healthy, Throttled, Degraded, Open, Disabled }
 public enum HealthOutcome { Success, Failure, AccountFailure, Throttled, Misconfigured, Ignored }
 
 public sealed record DeploymentHealthSnapshot(string DeploymentId, string AccountId, DeploymentHealth State,
-    bool AccountOpen, bool CanAttempt, TimeSpan RetryAfter, TimeSpan? P95);
+    bool AccountOpen, bool CanAttempt, TimeSpan RetryAfter, TimeSpan? P95, DateTimeOffset? OpenUntil = null, bool HalfOpen = false);
 
 public interface IHealthState
 {
@@ -113,8 +113,11 @@ public sealed class HealthState(TimeProvider timeProvider, IHealthObserver? obse
                 var state = State(entry, now);
                 if (account.IsOpen && state != DeploymentHealth.Disabled)
                     state = DeploymentHealth.Open;
+                // Half-open: every circuit that holds the deployment Open has reached its probe time.
+                var openUntil = state == DeploymentHealth.Open ? Later(entry.Circuit.OpenUntil, account.OpenUntil) : null;
                 return new DeploymentHealthSnapshot(entry.Deployment.Id, entry.Deployment.AccountId, state,
-                    account.IsOpen, CanAcquire(entry, account, now), retryAfter, p95s[entry.Deployment.Id]);
+                    account.IsOpen, CanAcquire(entry, account, now), retryAfter, p95s[entry.Deployment.Id],
+                    openUntil, openUntil <= now);
             }).ToArray();
         }
     }
@@ -244,6 +247,9 @@ public sealed class HealthState(TimeProvider timeProvider, IHealthObserver? obse
         entry.Circuit.CanAcquire(now) && account.CanAcquire(now);
 
     private static DateTimeOffset Max(DateTimeOffset first, DateTimeOffset second) => first > second ? first : second;
+
+    private static DateTimeOffset? Later(DateTimeOffset? first, DateTimeOffset? second) =>
+        first.HasValue && second.HasValue ? Max(first.Value, second.Value) : first ?? second;
 
     private sealed class Entry(Deployment deployment)
     {

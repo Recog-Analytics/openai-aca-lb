@@ -19,4 +19,11 @@
     <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Remove="Contracts/**" />
+    <Content Remove="Contracts/**" />
+    <None Remove="Contracts/**" />
+    <ProjectReference Include="Contracts/openai-loadbalancer.Contracts.csproj" />
+  </ItemGroup>
+
 </Project>

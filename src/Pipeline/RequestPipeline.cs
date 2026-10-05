@@ -12,7 +12,7 @@ namespace openai_loadbalancer.Pipeline;
 
 public sealed class RequestPipeline(DiscoveryState discovery, IDeploymentSelector selector, IRetryBudget budget,
     IBackendTokenProvider tokens, IHttpForwarder forwarder, HttpMessageInvoker transport, TimeProvider clock,
-    IOptions<RequestPipelineOptions> options, ILogger<RequestPipeline> logger, OperationsTelemetry telemetry)
+    IOptions<RequestPipelineOptions> options, ILogger<RequestPipeline> logger, OperationsTelemetry telemetry, RequestHistory history)
 {
     private static readonly ForwarderRequestConfig ForwarderConfig = new()
     {
@@ -23,20 +23,34 @@ public sealed class RequestPipeline(DiscoveryState discovery, IDeploymentSelecto
     public async Task InvokeAsync(HttpContext context)
     {
         var observation = new RequestObservation();
+        var startedAt = clock.GetUtcNow();
+        var started = clock.GetTimestamp();
         try
         {
             await InvokeCoreAsync(context, observation);
         }
-        catch
+        catch (Exception exception)
         {
             observation.Failed = true;
+            if (!context.Response.HasStarted)
+                observation.Status = exception is BadHttpRequestException badRequest
+                    ? badRequest.StatusCode : StatusCodes.Status500InternalServerError;
             throw;
         }
         finally
         {
             var outcome = observation.Failed ? "failure" : context.RequestAborted.IsCancellationRequested ? "client_abort" :
                 context.Response.StatusCode < 400 ? "success" : "error";
-            telemetry.RecordRequest(observation.Caller, observation.Model, observation.Deployment, context.Response.StatusCode, outcome);
+            var status = observation.Status ?? context.Response.StatusCode;
+            telemetry.RecordRequest(observation.Caller, observation.Model, observation.Deployment, status, outcome);
+            history.Add(new RequestRecord(Guid.NewGuid().ToString("N"), startedAt, observation.Caller,
+                observation.RequestedModel, observation.Model?.ToString(), observation.Zone, observation.Streaming,
+                status, clock.GetElapsedTime(started).TotalMilliseconds,
+                observation.Attempts.Select(attempt => new RequestAttemptRecord(attempt.Deployment.DeploymentName,
+                    attempt.Deployment.AccountName, attempt.Deployment.Region, attempt.Deployment.Tier,
+                    attempt.Transformer.Status, attempt.Transformer.Ttfb?.TotalMilliseconds,
+                    attempt.Outcome.ToString(), attempt.RetryReason, attempt.Deployment.Id)).ToArray(), outcome,
+                observation.Pool?.KindName, observation.Pool?.Name));
         }
     }
 
@@ -57,6 +71,7 @@ public sealed class RequestPipeline(DiscoveryState discovery, IDeploymentSelecto
         budget.RecordRequest();
         observation.Caller = caller.Name;
         var zone = RequestInput.ResolveZone(context.Request.Headers, caller);
+        observation.Zone = zone;
         if (zone == null)
         {
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
@@ -81,9 +96,11 @@ public sealed class RequestPipeline(DiscoveryState discovery, IDeploymentSelecto
         var attempts = 0;
         try
         {
-            var input = await RequestInput.ReadAsync(context, deadline.Token);
+            var input = await RequestInput.ReadAsync(context, deadline.Token, options.Value.MaximumBodyBytes);
             if (input == null)
                 return;
+            observation.RequestedModel = input.RequestedModel;
+            observation.Streaming = input.Streaming;
             var model = snapshot.Table.ResolveModel(input.RequestedModel);
             if (!model.Success)
             {
@@ -93,10 +110,11 @@ public sealed class RequestPipeline(DiscoveryState discovery, IDeploymentSelecto
             }
 
             observation.Model = model.Key;
+            observation.Pool = model.Pool;
             while (attempts < 3)
             {
                 deadline.Token.ThrowIfCancellationRequested();
-                var selected = pending ?? selector.Select(snapshot.Table, model.Key!.Value, zone, tried);
+                var selected = pending ?? selector.Select(snapshot.Table, model.Pool!.Value, zone, tried);
                 pending = null;
                 if (selected.Deployment == null || selected.Attempt == null)
                 {
@@ -143,13 +161,17 @@ public sealed class RequestPipeline(DiscoveryState discovery, IDeploymentSelecto
                 context.Request.Body = requestBody;
                 context.Request.ContentLength = body.Length;
                 context.Request.Headers.Remove("Transfer-Encoding");
-                using var ttfbTimer = new CancellationTokenSource(input.Streaming ? options.Value.StreamingTtfbTimeout : options.Value.NonStreamingTtfbTimeout, clock);
+                using var ttfbTimer = new CancellationTokenSource(input.Streaming ? options.Value.StreamingTtfbTimeout
+                    : options.Value.NonStreamingTtfbTimeout ?? Timeout.InfiniteTimeSpan, clock);
                 using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token, ttfbTimer.Token);
                 var transformer = new AttemptTransformer(deployment, input, token, attempts, healthAttempt, clock,
                     ttfbTimer, deadlineTimer, PrepareRetry, duration => telemetry.RecordTtfb(caller.Name, deployment, duration),
                     duration => telemetry.RecordThrottle(caller.Name, deployment, duration));
+                var attempt = new AttemptObservation(deployment, transformer);
+                observation.Attempts.Add(attempt);
                 var error = await forwarder.SendAsync(context, deployment.Endpoint.AbsoluteUri, transport,
                     ForwarderConfig, transformer, cancellation.Token);
+                attempt.Outcome = transformer.CompletedOutcome ?? HealthOutcome.Ignored;
 
                 // YARP also aborts the client connection after a backend body failure.
                 if (context.RequestAborted.IsCancellationRequested && error != ForwarderError.ResponseBodyDestination)
@@ -157,14 +179,25 @@ public sealed class RequestPipeline(DiscoveryState discovery, IDeploymentSelecto
                 if (transformer.Outcome == HealthOutcome.Misconfigured)
                     logger.LogError("Deployment {DeploymentId} rejected proxy authentication or does not exist; disabled until refresh", deployment.Id);
                 if (transformer.Retry)
+                {
+                    attempt.Outcome = transformer.Outcome;
+                    attempt.RetryReason = transformer.Outcome switch
+                    {
+                        HealthOutcome.Throttled => "throttled",
+                        HealthOutcome.Misconfigured => "misconfigured",
+                        _ => "backend_error"
+                    };
                     continue;
+                }
                 if (error == ForwarderError.None)
                 {
+                    attempt.Outcome = transformer.Outcome;
                     healthAttempt.Complete(transformer.Outcome);
                     return;
                 }
 
                 var failure = ClassifyError(error, context.GetForwarderErrorFeature()?.Exception);
+                attempt.Outcome = transformer.CompletedOutcome ?? failure;
                 observation.Failed = failure != HealthOutcome.Ignored;
                 healthAttempt.Complete(failure);
                 if (!context.Response.HasStarted)
@@ -179,7 +212,11 @@ public sealed class RequestPipeline(DiscoveryState discovery, IDeploymentSelecto
                 if (deadlineTimer.IsCancellationRequested)
                     throw new OperationCanceledException(deadline.Token);
                 if (PrepareRetry())
+                {
+                    attempt.RetryReason = ttfbTimer.IsCancellationRequested ? "ttfb_timeout" :
+                        failure == HealthOutcome.AccountFailure ? "account_failure" : "transport_error";
                     continue;
+                }
                 context.Response.StatusCode = ttfbTimer.IsCancellationRequested ? StatusCodes.Status504GatewayTimeout : StatusCodes.Status502BadGateway;
                 return;
             }
@@ -188,7 +225,7 @@ public sealed class RequestPipeline(DiscoveryState discovery, IDeploymentSelecto
             {
                 if (attempts >= 3 || deadline.IsCancellationRequested || clock.GetUtcNow() >= expiresAt)
                     return false;
-                var next = selector.Select(snapshot.Table, model.Key!.Value, zone, tried);
+                var next = selector.Select(snapshot.Table, model.Pool!.Value, zone, tried);
                 var canWait = next.RetryAfter is { } delay && !waited && delay < expiresAt - clock.GetUtcNow();
                 var remaining = expiresAt - clock.GetUtcNow();
                 if ((next.Attempt == null && !canWait) || remaining <= TimeSpan.Zero || !budget.TryAcquireRetry())
@@ -204,6 +241,7 @@ public sealed class RequestPipeline(DiscoveryState discovery, IDeploymentSelecto
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
         {
             // Disconnects release health probes without a failure outcome.
+            observation.Failed = false;
         }
         catch (OperationCanceledException) when (deadlineTimer.IsCancellationRequested)
         {
@@ -224,8 +262,22 @@ public sealed class RequestPipeline(DiscoveryState discovery, IDeploymentSelecto
     {
         public string? Caller { get; set; }
         public ModelKey? Model { get; set; }
+        public RoutingPool? Pool { get; set; }
         public Deployment? Deployment { get; set; }
         public bool Failed { get; set; }
+        public int? Status { get; set; }
+        public string? RequestedModel { get; set; }
+        public string? Zone { get; set; }
+        public bool Streaming { get; set; }
+        public List<AttemptObservation> Attempts { get; } = [];
+    }
+
+    private sealed class AttemptObservation(Deployment deployment, AttemptTransformer transformer)
+    {
+        public Deployment Deployment { get; } = deployment;
+        public AttemptTransformer Transformer { get; } = transformer;
+        public HealthOutcome Outcome { get; set; } = HealthOutcome.Ignored;
+        public string? RetryReason { get; set; }
     }
 
     private static HealthOutcome ClassifyError(ForwarderError error, Exception? exception)

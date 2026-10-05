@@ -14,6 +14,9 @@ internal sealed class AttemptTransformer(Deployment deployment, RequestInput inp
     public bool HeadersReceived { get; private set; }
     public bool Retry { get; private set; }
     public HealthOutcome Outcome { get; private set; } = HealthOutcome.Ignored;
+    public HealthOutcome? CompletedOutcome { get; private set; }
+    public int? Status { get; private set; }
+    public TimeSpan? Ttfb { get; private set; }
 
     public override async ValueTask TransformRequestAsync(HttpContext context, HttpRequestMessage request,
         string destinationPrefix, CancellationToken cancellationToken)
@@ -39,9 +42,13 @@ internal sealed class AttemptTransformer(Deployment deployment, RequestInput inp
         // Response bodies have no deadline. A retry restores the original remaining deadline.
         deadlineTimer.CancelAfter(Timeout.InfiniteTimeSpan);
         var duration = clock.GetElapsedTime(sentAt);
-        healthAttempt.RecordTtfb(duration);
+        Ttfb = duration;
+        // Non-streaming headers arrive after the whole completion, so only streaming TTFB feeds degradation.
+        if (input.Streaming)
+            healthAttempt.RecordTtfb(duration);
         recordTtfb(duration);
         var status = (int)response.StatusCode;
+        Status = status;
         Outcome = status switch
         {
             429 => HealthOutcome.Throttled,
@@ -58,6 +65,7 @@ internal sealed class AttemptTransformer(Deployment deployment, RequestInput inp
         if (Outcome is HealthOutcome.Throttled or HealthOutcome.Misconfigured or HealthOutcome.Failure)
         {
             healthAttempt.Complete(Outcome, Header(response, "retry-after-ms"), Header(response, "Retry-After"));
+            CompletedOutcome = Outcome;
             Retry = retry();
             if (Retry)
                 return false;

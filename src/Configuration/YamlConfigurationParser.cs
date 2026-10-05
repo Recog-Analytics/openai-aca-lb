@@ -26,6 +26,18 @@ public sealed class YamlConfigurationParser : IYamlConfigurationParser
             RequireText(model, "Default model name");
             RequireText(version, "Default model version");
         }
+        var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (alias, target) in config.Aliases)
+        {
+            RequireText(alias, "Alias name");
+            if (alias.Contains('@'))
+                throw new ArgumentException($"Alias '{alias}' cannot contain '@'.");
+            if (!aliases.Add(alias))
+                throw new ArgumentException($"Alias '{alias}' is defined more than once (aliases are case-insensitive).");
+            var parts = (target ?? "").Split('@');
+            if (parts.Length > 2 || parts.Any(string.IsNullOrWhiteSpace))
+                throw new ArgumentException($"Alias '{alias}' must target 'name' or 'name@version'.");
+        }
         foreach (var exclusion in config.Exclude)
         {
             RequireText(exclusion.Account, "Excluded account");

@@ -8,8 +8,10 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using openai_loadbalancer.Configuration;
 using openai_loadbalancer.Discovery;
 using openai_loadbalancer.Health;
@@ -166,6 +168,95 @@ public class RequestPipelineTests
         Assert.Equal(0, backend.RequestCount);
     }
 
+    [Theory]
+    [InlineData("gpt-4o", 200, "gpt-4o@2024-11-20")]
+    [InlineData("unknown-model", 400, null)]
+    public async Task RequestFeedShowsRequestedAndResolvedV1Models(string requestedModel, int status, string? modelKey)
+    {
+        await using var backend = await Server.StartAsync(context => context.Response.WriteAsync("private response"));
+        await using var proxy = await Proxy.StartAsync([Source(backend, "actual-deployment")]);
+        using var request = Request("/v1/chat/completions",
+            JsonSerializer.Serialize(new { model = requestedModel, messages = new[] { new { content = "private prompt" } } }));
+        using var response = await proxy.Client.SendAsync(request);
+        Assert.Equal(status, (int)response.StatusCode);
+        var record = await CompletedRequestAsync(proxy);
+        Assert.Equal(requestedModel, record.RequestedModel);
+        Assert.Equal(modelKey, record.ModelKey);
+        Assert.Equal(status, record.Status);
+        Assert.Equal(status == 200 ? 1 : 0, record.Attempts.Count);
+        using var feedRequest = Request("/admin/requests?limit=1");
+        feedRequest.Method = HttpMethod.Get;
+        using var feed = await proxy.Client.SendAsync(feedRequest);
+        Assert.Equal(HttpStatusCode.OK, feed.StatusCode);
+        var text = await feed.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("private prompt", text);
+        Assert.DoesNotContain("private response", text);
+        Assert.DoesNotContain(Key, text);
+        using var json = JsonDocument.Parse(text);
+        Assert.Equal(record.Id, Assert.Single(json.RootElement.EnumerateArray()).GetProperty("id").GetString());
+        using var stateRequest = Request("/admin/state");
+        stateRequest.Method = HttpMethod.Get;
+        using var state = await proxy.Client.SendAsync(stateRequest);
+        using var health = await proxy.Client.GetAsync("/healthz");
+        using var ready = await proxy.Client.GetAsync("/readyz");
+        Assert.Single(proxy.History.GetRecent(500));
+    }
+
+    [Theory]
+    [InlineData(400)]
+    [InlineData(413)]
+    [InlineData(500)]
+    public async Task RequestFeedReportsExceptionResponseStatus(int status)
+    {
+        await using var backend = await Server.StartAsync(context => context.Response.WriteAsync("unexpected"));
+        Exception exception = status == 500 ? new IOException("body read failed") : new BadHttpRequestException("bad body", status);
+        await using var proxy = await Proxy.StartAsync([Source(backend)], bodyReadException: exception);
+        using var request = Request(Path);
+        using var response = await proxy.Client.SendAsync(request);
+        Assert.Equal(status, (int)response.StatusCode);
+        var record = await CompletedRequestAsync(proxy);
+        Assert.Equal(status, record.Status);
+        Assert.Equal("failure", record.Outcome);
+        Assert.Empty(record.Attempts);
+        Assert.Equal(0, backend.RequestCount);
+    }
+
+    [Theory]
+    [InlineData(429, "Throttled")]
+    [InlineData(403, "Misconfigured")]
+    public async Task BodyFailurePreservesAlreadyRecordedHealthOutcome(int status, string healthOutcome)
+    {
+        var abort = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var backend = await Server.StartAsync(async context =>
+        {
+            context.Response.StatusCode = status;
+            context.Response.ContentLength = 100;
+            await context.Response.WriteAsync("first bytes");
+            await context.Response.Body.FlushAsync();
+            await abort.Task.WaitAsync(context.RequestAborted);
+            context.Abort();
+        });
+        await using var proxy = await Proxy.StartAsync([Source(backend)], retryBudget: new NoRetries());
+        try
+        {
+            using var request = Request(Path);
+            using var response = await proxy.Client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+            abort.TrySetResult();
+            await Assert.ThrowsAsync<HttpRequestException>(() => response.Content.ReadAsByteArrayAsync());
+            var record = await CompletedRequestAsync(proxy);
+            var attempt = Assert.Single(record.Attempts);
+            Assert.Equal(status, attempt.Status);
+            Assert.Equal(healthOutcome, attempt.HealthOutcome);
+            Assert.Null(attempt.RetryReason);
+            Assert.Equal("failure", record.Outcome);
+            Assert.Equal(healthOutcome, Assert.Single(proxy.Health.Outcomes).ToString());
+        }
+        finally
+        {
+            abort.TrySetResult();
+        }
+    }
+
     [Fact]
     public async Task DefaultZoneEnforcesResidencyAndGlobalAllowsAllZones()
     {
@@ -302,6 +393,7 @@ public class RequestPipelineTests
             Assert.Equal("data: first", await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5)));
             Assert.Equal("", await reader.ReadLineAsync());
             await Task.Delay(350);
+            Assert.Empty(proxy.History.GetRecent(500));
             release.TrySetResult();
             Assert.Equal("data: second", await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5)));
             Assert.Equal("1", Header(response, "x-lb-attempts"));
@@ -311,6 +403,11 @@ public class RequestPipelineTests
             release.TrySetResult();
         }
         Assert.Equal(1, backend.RequestCount);
+        var record = await CompletedRequestAsync(proxy);
+        Assert.True(record.Streaming);
+        Assert.Equal("success", record.Outcome);
+        Assert.True(record.DurationMs >= 350);
+        Assert.True(Assert.Single(record.Attempts).TtfbMs < record.DurationMs);
     }
 
     [Fact]
@@ -340,6 +437,10 @@ public class RequestPipelineTests
             await WaitUntilAsync(() => proxy.Health.Outcomes.Contains(HealthOutcome.Failure));
             Assert.Equal(0, fallback.RequestCount);
             Assert.Equal(1, broken.RequestCount);
+            var record = await CompletedRequestAsync(proxy);
+            Assert.Equal("failure", record.Outcome);
+            Assert.Equal("Failure", Assert.Single(record.Attempts).HealthOutcome);
+            Assert.Null(record.Attempts[0].RetryReason);
         }
         finally
         {
@@ -380,6 +481,35 @@ public class RequestPipelineTests
         Assert.Contains(status == 429 ? HealthOutcome.Throttled : HealthOutcome.Failure, proxy.Health.Outcomes);
         Assert.Equal(1, primary.RequestCount);
         Assert.Equal(1, fallback.RequestCount);
+        var record = await CompletedRequestAsync(proxy);
+        Assert.Equal("integration-caller", record.Caller);
+        Assert.Equal(Model, record.RequestedModel);
+        Assert.Equal(Model, record.ModelKey);
+        Assert.Equal("eu", record.Zone);
+        Assert.Equal(200, record.Status);
+        Assert.Equal("success", record.Outcome);
+        Assert.False(record.Streaming);
+        Assert.Collection(record.Attempts, first =>
+        {
+            Assert.Equal("primary", first.Deployment);
+            Assert.Equal("primary", first.Account);
+            Assert.Equal("westeurope", first.Region);
+            Assert.Equal(0, first.Tier);
+            Assert.Equal(status, first.Status);
+            Assert.True(first.TtfbMs >= 0);
+            Assert.Equal(status == 429 ? "Throttled" : "Failure", first.HealthOutcome);
+            Assert.Equal(status == 429 ? "throttled" : "backend_error", first.RetryReason);
+        }, second =>
+        {
+            Assert.Equal("fallback", second.Deployment);
+            Assert.Equal(200, second.Status);
+            Assert.Equal("Success", second.HealthOutcome);
+            Assert.Null(second.RetryReason);
+        });
+        var text = JsonSerializer.Serialize(record);
+        Assert.DoesNotContain("hello", text);
+        Assert.DoesNotContain(Key, text);
+        Assert.DoesNotContain("managed-identity-token", text);
     }
 
     [Theory]
@@ -425,6 +555,13 @@ public class RequestPipelineTests
         Assert.Equal("2", Header(response, "x-lb-attempts"));
         await aborted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Contains(HealthOutcome.Failure, proxy.Health.Outcomes);
+        var record = await CompletedRequestAsync(proxy);
+        Assert.Equal(streaming, record.Streaming);
+        Assert.Equal(2, record.Attempts.Count);
+        Assert.Null(record.Attempts[0].Status);
+        Assert.Null(record.Attempts[0].TtfbMs);
+        Assert.Equal("Failure", record.Attempts[0].HealthOutcome);
+        Assert.Equal("ttfb_timeout", record.Attempts[0].RetryReason);
     }
 
     [Fact]
@@ -454,6 +591,31 @@ public class RequestPipelineTests
         await WaitUntilAsync(() => !proxy.Health.Outcomes.IsEmpty);
         Assert.DoesNotContain(HealthOutcome.Failure, proxy.Health.Outcomes);
         Assert.DoesNotContain(HealthOutcome.AccountFailure, proxy.Health.Outcomes);
+        Assert.Equal(0, fallback.RequestCount);
+        var record = await CompletedRequestAsync(proxy);
+        Assert.Equal("client_abort", record.Outcome);
+        Assert.Equal("Ignored", Assert.Single(record.Attempts).HealthOutcome);
+        Assert.Null(record.Attempts[0].RetryReason);
+    }
+
+    [Fact]
+    public async Task ClientAbortDuringRetryTokenAcquisitionClearsPreviousFailureOutcome()
+    {
+        var refused = await Server.StartAsync(context => context.Response.WriteAsync("unused"));
+        var primary = Source(refused, "primary", sku: "ProvisionedManaged");
+        await refused.DisposeAsync();
+        await using var fallback = await Server.StartAsync(context => context.Response.WriteAsync("unexpected"));
+        var tokens = new PausingRetryTokenProvider();
+        await using var proxy = await Proxy.StartAsync([primary, Source(fallback, "fallback")], tokenProvider: tokens);
+        using var cancellation = new CancellationTokenSource();
+        using var request = Request(Path);
+        var send = proxy.Client.SendAsync(request, cancellation.Token);
+        await tokens.RetryStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send);
+        var record = await CompletedRequestAsync(proxy);
+        Assert.Equal("client_abort", record.Outcome);
+        Assert.Equal("AccountFailure", Assert.Single(record.Attempts).HealthOutcome);
         Assert.Equal(0, fallback.RequestCount);
     }
 
@@ -504,11 +666,11 @@ public class RequestPipelineTests
     }
 
     [Fact]
-    public async Task RequestBodyOverSixteenMegabytesReturns413WithoutForwarding()
+    public async Task RequestBodyOverDefaultLimitReturns413WithoutForwarding()
     {
         await using var backend = await Server.StartAsync(context => context.Response.WriteAsync("unexpected"));
         await using var proxy = await Proxy.StartAsync([Source(backend)]);
-        using var request = Request(Path, new string('x', 16 * 1024 * 1024 + 1));
+        using var request = Request(Path, new string('x', RequestInput.DefaultMaximumBodyBytes + 1));
         using var response = await proxy.Client.SendAsync(request);
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
         Assert.Equal(0, backend.RequestCount);
@@ -611,6 +773,12 @@ public class RequestPipelineTests
         Assert.Contains(HealthOutcome.AccountFailure, proxy.Health.Outcomes);
         Assert.All(proxy.Health.GetSnapshot().Where(item => item.AccountId == primary.AccountId),
             item => Assert.True(item.AccountOpen));
+        var record = await CompletedRequestAsync(proxy);
+        Assert.Equal(2, record.Attempts.Count);
+        Assert.Null(record.Attempts[0].Status);
+        Assert.Null(record.Attempts[0].TtfbMs);
+        Assert.Equal("AccountFailure", record.Attempts[0].HealthOutcome);
+        Assert.Equal("account_failure", record.Attempts[0].RetryReason);
     }
 
     [Fact]
@@ -657,7 +825,7 @@ public class RequestPipelineTests
             overallTimeout: TimeSpan.FromMilliseconds(400));
         try
         {
-            using var request = Request(Path);
+            using var request = Request(Path, "{\"stream\":true}");
             var send = proxy.Client.SendAsync(request);
             await WaitUntilAsync(() => proxy.Health.TtfbCount > 0);
             await Task.Delay(500);
@@ -699,7 +867,7 @@ public class RequestPipelineTests
             Source(primary, "primary", sku: "ProvisionedManaged"), Source(fallback, "fallback")]);
         try
         {
-            using var request = Request(Path);
+            using var request = Request(Path, "{\"stream\":true}");
             var send = proxy.Client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
             await headersSent.Task.WaitAsync(TimeSpan.FromSeconds(5));
             await WaitUntilAsync(() => proxy.Health.TtfbCount > 0);
@@ -726,6 +894,213 @@ public class RequestPipelineTests
         }
     }
 
+    [Fact]
+    public async Task LegacyDeploymentNameWorksThroughAliasOnAzurePathAndV1Body()
+    {
+        var captured = new ConcurrentQueue<ReceivedRequest>();
+        await using var backend = await Server.StartAsync(async context =>
+        {
+            captured.Enqueue(await ReceivedRequest.ReadAsync(context));
+            await context.Response.WriteAsync("ok");
+        });
+        await using var proxy = await Proxy.StartAsync([Source(backend, "actual-deployment")],
+            overrides: new RoutingOverrides { Aliases = new() { ["chat"] = Model } });
+        using var pathRequest = Request("/openai/deployments/chat/chat/completions?api-version=2024-10-21");
+        using var pathResponse = await proxy.Client.SendAsync(pathRequest);
+        Assert.Equal(HttpStatusCode.OK, pathResponse.StatusCode);
+        using var v1Request = Request("/openai/v1/chat/completions", "{\"model\":\"Chat\"}");
+        using var v1Response = await proxy.Client.SendAsync(v1Request);
+        Assert.Equal(HttpStatusCode.OK, v1Response.StatusCode);
+        Assert.True(captured.TryDequeue(out var path));
+        Assert.Equal("/openai/deployments/actual-deployment/chat/completions", path.Path);
+        Assert.Equal("?api-version=2024-10-21", path.Query);
+        Assert.True(captured.TryDequeue(out var v1));
+        using var body = JsonDocument.Parse(v1.Body);
+        Assert.Equal("actual-deployment", body.RootElement.GetProperty("model").GetString());
+    }
+
+    [Fact]
+    public async Task SixtySecondNonStreamingCompletionIsNotCutOffOrRetried()
+    {
+        var clock = new TestClock();
+        var received = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var slow = await Server.StartAsync(async context =>
+        {
+            received.TrySetResult();
+            await release.Task.WaitAsync(context.RequestAborted);
+            await context.Response.WriteAsync("completion");
+        });
+        await using var fallback = await Server.StartAsync(context => context.Response.WriteAsync("unexpected"));
+        await using var proxy = await Proxy.StartAsync([
+            Source(slow, "slow", sku: "ProvisionedManaged"), Source(fallback, "fallback")], clock: clock);
+        try
+        {
+            using var request = Request(Path);
+            var send = proxy.Client.SendAsync(request);
+            await received.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            clock.Advance(TimeSpan.FromSeconds(60));
+            release.TrySetResult();
+            using var response = await send.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal("completion", await response.Content.ReadAsStringAsync());
+            Assert.Equal("1", Header(response, "x-lb-attempts"));
+            Assert.Equal(0, fallback.RequestCount);
+            await WaitUntilAsync(() => !proxy.Health.Outcomes.IsEmpty);
+            Assert.Equal(HealthOutcome.Success, Assert.Single(proxy.Health.Outcomes));
+        }
+        finally
+        {
+            release.TrySetResult();
+        }
+    }
+
+    [Fact]
+    public async Task NonStreamingLatencyNeverFeedsDegradation()
+    {
+        await using var backend = await Server.StartAsync(context => context.Response.WriteAsync("ok"));
+        await using var proxy = await Proxy.StartAsync([Source(backend)]);
+        for (var i = 0; i < 25; i++)
+        {
+            using var request = Request(Path);
+            using var response = await proxy.Client.SendAsync(request);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        }
+        await WaitUntilAsync(() => proxy.Health.Outcomes.Count == 25);
+        Assert.Equal(0, proxy.Health.TtfbCount);
+        var snapshot = Assert.Single(proxy.Health.GetSnapshot());
+        Assert.Null(snapshot.P95);
+        Assert.Equal(DeploymentHealth.Healthy, snapshot.State);
+
+        using var streamingRequest = Request(Path, "{\"stream\":true}");
+        using var streamingResponse = await proxy.Client.SendAsync(streamingRequest);
+        Assert.Equal(HttpStatusCode.OK, streamingResponse.StatusCode);
+        await WaitUntilAsync(() => proxy.Health.TtfbCount == 1);
+    }
+
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData("00:10:00", true)]
+    [InlineData("00:10:01", false)]
+    public void OverallTimeoutDefaultsTo120SecondsAndAllowsUpTo600(string? overall, bool valid)
+    {
+        var settings = new Dictionary<string, string?>();
+        if (overall != null)
+            settings["RequestPipeline:OverallTimeout"] = overall;
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
+        using var services = new ServiceCollection().AddRequestPipeline(configuration).BuildServiceProvider();
+        var options = services.GetRequiredService<IOptions<RequestPipelineOptions>>();
+        if (!valid)
+        {
+            Assert.Throws<OptionsValidationException>(() => options.Value);
+            return;
+        }
+        Assert.Equal(overall == null ? TimeSpan.FromSeconds(120) : TimeSpan.Parse(overall), options.Value.OverallTimeout);
+        Assert.Null(options.Value.NonStreamingTtfbTimeout);
+    }
+
+    [Fact]
+    public async Task DeploymentNamePathRoutesAcrossEveryAccountWithThatName()
+    {
+        await using var west = await Server.StartAsync(context => { context.Response.StatusCode = 503; return Task.CompletedTask; });
+        await using var france = await Server.StartAsync(context => { context.Response.StatusCode = 503; return Task.CompletedTask; });
+        await using var sweden = await Server.StartAsync(context => { context.Response.StatusCode = 503; return Task.CompletedTask; });
+        await using var other = await Server.StartAsync(context => context.Response.WriteAsync("unexpected"));
+        await using var proxy = await Proxy.StartAsync([
+            Source(west, "llm-gpt-4o", account: "oai-westeurope"),
+            Source(france, "llm-gpt-4o", account: "oai-francecentral"),
+            Source(sweden, "LLM-GPT-4O", account: "oai-swedencentral"),
+            Source(other, "other-gpt-4o", account: "oai-other")]);
+        using var request = Request("/openai/deployments/llm-gpt-4o/chat/completions?api-version=2024-10-21");
+        using var response = await proxy.Client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal("3", Header(response, "x-lb-attempts"));
+        Assert.Equal(1, west.RequestCount);
+        Assert.Equal(1, france.RequestCount);
+        Assert.Equal(1, sweden.RequestCount);
+        Assert.Equal(0, other.RequestCount);
+        var record = await CompletedRequestAsync(proxy);
+        Assert.Equal("deployment", record.PoolKind);
+        Assert.Equal("llm-gpt-4o", record.Pool);
+        Assert.Equal(Model, record.ModelKey);
+    }
+
+    [Theory]
+    [InlineData("llm-gpt-4omini-public", "llm-gpt-4omini")]
+    [InlineData("llm-gpt-4omini", "llm-gpt-4omini-public")]
+    public async Task SameModelDeploymentNamesStaySeparatePools(string requested, string excluded)
+    {
+        var mini = new ModelKey("gpt-4o-mini", "2024-07-18");
+        var paths = new ConcurrentQueue<string>();
+        await using var requestedWest = await Server.StartAsync(context => { context.Response.StatusCode = 503; return Task.CompletedTask; });
+        await using var requestedFrance = await Server.StartAsync(context => { context.Response.StatusCode = 503; return Task.CompletedTask; });
+        await using var excludedWest = await Server.StartAsync(context => context.Response.WriteAsync("unexpected"));
+        await using var excludedFrance = await Server.StartAsync(context => context.Response.WriteAsync("unexpected"));
+        await using var proxy = await Proxy.StartAsync([
+            Source(requestedWest, requested, account: "oai-westeurope", model: mini),
+            Source(requestedFrance, requested, account: "oai-francecentral", model: mini),
+            Source(excludedWest, excluded, account: "oai-westeurope", model: mini),
+            Source(excludedFrance, excluded, account: "oai-francecentral", model: mini)]);
+        for (var i = 0; i < 5; i++)
+        {
+            using var request = Request($"/openai/deployments/{requested}/chat/completions?api-version=2024-10-21");
+            using var response = await proxy.Client.SendAsync(request);
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        }
+        Assert.Equal(0, excludedWest.RequestCount + excludedFrance.RequestCount);
+        Assert.True(requestedWest.RequestCount + requestedFrance.RequestCount > 0);
+    }
+
+    [Fact]
+    public async Task TwentyMegabyteMultipartUploadIsForwardedVerbatim()
+    {
+        var audio = RandomNumberGenerator.GetBytes(20 * 1024 * 1024);
+        using var form = new MultipartFormDataContent { { new ByteArrayContent(audio), "file", "speech.wav" }, { new StringContent("json"), "response_format" } };
+        var sent = await form.ReadAsByteArrayAsync();
+        var contentType = form.Headers.ContentType!.ToString();
+        byte[]? received = null;
+        string? receivedType = null;
+        string? receivedPath = null;
+        await using var backend = await Server.StartAsync(async context =>
+        {
+            using var buffer = new MemoryStream();
+            await context.Request.Body.CopyToAsync(buffer, context.RequestAborted);
+            received = buffer.ToArray();
+            receivedType = context.Request.ContentType;
+            receivedPath = context.Request.Path;
+            await context.Response.WriteAsync("{\"text\":\"ok\"}");
+        });
+        await using var proxy = await Proxy.StartAsync([Source(backend, "llm-whisper", model: new("whisper", "001"))]);
+        using var request = new HttpRequestMessage(HttpMethod.Post,
+            "/openai/deployments/llm-whisper/audio/transcriptions?api-version=2024-06-01") { Content = new ByteArrayContent(sent) };
+        request.Content.Headers.TryAddWithoutValidation("Content-Type", contentType);
+        request.Headers.Add("api-key", Key);
+        using var response = await proxy.Client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("/openai/deployments/llm-whisper/audio/transcriptions", receivedPath);
+        Assert.Equal(contentType, receivedType);
+        Assert.Equal(SHA256.HashData(sent), SHA256.HashData(received!));
+    }
+
+    [Fact]
+    public async Task ConfiguredBodyLimitAboveServerDefaultAcceptsLargerBodies()
+    {
+        long? length = null;
+        await using var backend = await Server.StartAsync(async context =>
+        {
+            // The fake backend has Kestrel's default 30 MB limit; only the proxy limit is under test.
+            context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>()!.MaxRequestBodySize = null;
+            using var buffer = new MemoryStream();
+            await context.Request.Body.CopyToAsync(buffer, context.RequestAborted);
+            length = buffer.Length;
+        });
+        await using var proxy = await Proxy.StartAsync([Source(backend)], maximumBodyBytes: 40 * 1024 * 1024);
+        using var request = Request("/openai/deployments/gpt-4o/audio/transcriptions", new string('x', 32 * 1024 * 1024));
+        using var response = await proxy.Client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(32 * 1024 * 1024, length);
+    }
+
     private static HttpRequestMessage Request(string path, string body = "{}", string? key = Key, bool bearer = false)
     {
         var request = new HttpRequestMessage(HttpMethod.Post, path) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
@@ -741,14 +1116,21 @@ public class RequestPipelineTests
 
     private static string Header(HttpResponseMessage response, string name) => Assert.Single(response.Headers.GetValues(name));
 
-    private static DiscoveredDeployment Source(Server server, string name = "backend", string sku = "Standard", string region = "westeurope") =>
-        new("/accounts/" + name, name, server.Address, region, name, new("gpt-4o", "2024-11-20"), sku, 100, "Succeeded");
+    private static DiscoveredDeployment Source(Server server, string name = "backend", string sku = "Standard", string region = "westeurope",
+        string? account = null, ModelKey? model = null) =>
+        new("/accounts/" + (account ?? name), account ?? name, server.Address, region, name, model ?? new("gpt-4o", "2024-11-20"), sku, 100, "Succeeded");
 
     private static async Task WaitUntilAsync(Func<bool> condition)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         while (!condition())
             await Task.Delay(10, timeout.Token);
+    }
+
+    private static async Task<RequestRecord> CompletedRequestAsync(Proxy proxy)
+    {
+        await WaitUntilAsync(() => proxy.History.GetRecent(1).Count > 0);
+        return Assert.Single(proxy.History.GetRecent(1));
     }
 
     private sealed record ReceivedRequest(string Path, string Query, string? Authorization, string? ApiKey, string Body)
@@ -793,29 +1175,44 @@ public class RequestPipelineTests
     {
         public HttpClient Client { get; } = new() { BaseAddress = new Uri(app.Urls.Single()), Timeout = TimeSpan.FromSeconds(10) };
         public RecordingHealth Health => health;
+        public RequestHistory History => app.Services.GetRequiredService<RequestHistory>();
 
         public static async Task<Proxy> StartAsync(DiscoveredDeployment[] deployments, TimeSpan? ttfbTimeout = null,
-            TimeSpan? overallTimeout = null, IRetryBudget? retryBudget = null, bool publishSnapshot = true)
+            TimeSpan? overallTimeout = null, IRetryBudget? retryBudget = null, bool publishSnapshot = true,
+            Exception? bodyReadException = null, IBackendTokenProvider? tokenProvider = null,
+            RoutingOverrides? overrides = null, TimeProvider? clock = null, int? maximumBodyBytes = null)
         {
             var builder = NewBuilder();
             var health = new RecordingHealth();
-            builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
+            builder.Services.AddSingleton(clock ?? TimeProvider.System);
             builder.Services.AddSingleton<IHealthState>(health);
             builder.Services.AddSingleton<IRetryBudget>(retryBudget ?? new RetryBudget(TimeProvider.System));
             builder.Services.AddSingleton<DiscoveryState>();
             builder.Services.AddRequestPipeline(builder.Configuration);
-            builder.Services.AddSingleton<IBackendTokenProvider>(new FakeTokenProvider());
+            builder.Services.AddSingleton<IBackendTokenProvider>(tokenProvider ?? new FakeTokenProvider());
             builder.Services.Configure<RequestPipelineOptions>(options =>
             {
                 if (ttfbTimeout.HasValue)
                     options.NonStreamingTtfbTimeout = options.StreamingTtfbTimeout = ttfbTimeout.Value;
                 if (overallTimeout.HasValue)
                     options.OverallTimeout = overallTimeout.Value;
+                if (maximumBodyBytes.HasValue)
+                    options.MaximumBodyBytes = maximumBodyBytes.Value;
             });
             builder.Services.AddHealthChecks();
             var app = builder.Build();
+            if (bodyReadException != null)
+            {
+                app.UseDeveloperExceptionPage();
+                app.Use(async (context, next) =>
+                {
+                    using var body = new FailingBodyStream(bodyReadException);
+                    context.Request.Body = body;
+                    await next(context);
+                });
+            }
             var table = new RoutingTableBuilder().Build(deployments,
-                new RegionGeography(new Dictionary<string, string> { ["westeurope"] = "Europe", ["eastus"] = "United States" }), new());
+                new RegionGeography(new Dictionary<string, string> { ["westeurope"] = "Europe", ["eastus"] = "United States" }), overrides ?? new());
             var callers = new CallersConfiguration
             {
                 Callers = [new Caller
@@ -827,10 +1224,11 @@ public class RequestPipelineTests
             var state = app.Services.GetRequiredService<DiscoveryState>();
             if (publishSnapshot)
                 typeof(DiscoveryState).GetMethod("Publish", BindingFlags.Instance | BindingFlags.NonPublic)!
-                    .Invoke(state, [new DiscoverySnapshot(table, callers, DateTimeOffset.UtcNow), new RoutingOverrides()]);
+                    .Invoke(state, [new DiscoverySnapshot(table, callers, DateTimeOffset.UtcNow), overrides ?? new RoutingOverrides()]);
             app.MapHealthChecks("/healthz");
             app.MapDiscoveryReadiness();
             app.MapAdminState();
+            app.MapAdminRequests();
             app.MapRequestPipeline();
             await app.StartAsync();
             return new(app, health);
@@ -855,6 +1253,28 @@ public class RequestPipelineTests
     private sealed class FakeTokenProvider : IBackendTokenProvider
     {
         public ValueTask<string> GetTokenAsync(CancellationToken cancellationToken) => ValueTask.FromResult("managed-identity-token");
+    }
+
+    private sealed class FailingBodyStream(Exception exception) : MemoryStream
+    {
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            ValueTask.FromException<int>(exception);
+    }
+
+    private sealed class PausingRetryTokenProvider : IBackendTokenProvider
+    {
+        private int calls;
+        public TaskCompletionSource RetryStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async ValueTask<string> GetTokenAsync(CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref calls) > 1)
+            {
+                RetryStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            return "managed-identity-token";
+        }
     }
 
     private sealed class NoRetries : IRetryBudget

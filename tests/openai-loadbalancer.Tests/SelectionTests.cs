@@ -176,13 +176,13 @@ public class SelectionTests
         var fixture = new Fixture(Source("a"), Source("b"));
         var racing = new SnapshotHealth(fixture.Health.GetSnapshot(), fixture.Health) { RejectCount = 1 };
         var selector = new DeploymentSelector(racing, fixture.Random);
-        var result = selector.Select(fixture.Table, Model, "eu", new HashSet<string>());
+        var result = selector.Select(fixture.Table, RoutingPool.For(Model), "eu", new HashSet<string>());
         using var attempt = result.Attempt;
         Assert.Equal("b", result.Deployment?.DeploymentName);
         Assert.Equal(2, racing.Acquisitions);
         racing.RejectCount = int.MaxValue;
         racing.Acquisitions = 0;
-        var unavailable = selector.Select(fixture.Table, Model, "eu", new HashSet<string>());
+        var unavailable = selector.Select(fixture.Table, RoutingPool.For(Model), "eu", new HashSet<string>());
         Assert.Null(unavailable.Deployment);
         Assert.Equal(2, racing.Acquisitions);
     }
@@ -216,7 +216,7 @@ public class SelectionTests
 
         public string Id(string name) => Table.Deployments.Single(deployment => deployment.DeploymentName == name).Id;
         public SelectionResult Select(string zone = "eu", string[]? tried = null, ModelKey? model = null) =>
-            new DeploymentSelector(Health, Random).Select(Table, model ?? Model, zone,
+            new DeploymentSelector(Health, Random).Select(Table, RoutingPool.For(model ?? Model), zone,
                 (tried ?? []).ToHashSet(StringComparer.OrdinalIgnoreCase));
         public void Finish(string name, HealthOutcome outcome, string? retryAfter = null) =>
             Health.TryAcquire(Id(name))!.Complete(outcome, retryAfter: retryAfter);

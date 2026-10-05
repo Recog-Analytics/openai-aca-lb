@@ -3,6 +3,12 @@ namespace openai_loadbalancer.Routing;
 public readonly record struct ModelKey(string Name, string Version)
 {
     public override string ToString() => $"{Name}@{Version}";
+
+    public static ModelKey Parse(string value)
+    {
+        var parts = value.Split('@');
+        return parts.Length == 2 ? new(parts[0], parts[1]) : throw new FormatException("A model key has the form 'name@version'.");
+    }
 }
 
 public sealed record DiscoveredDeployment(

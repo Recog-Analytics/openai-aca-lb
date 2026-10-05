@@ -80,6 +80,22 @@ public class HealthStateTests
     }
 
     [Fact]
+    public void SnapshotReportsOpenDeadlineAndHalfOpenProbeWindow()
+    {
+        var fixture = new Fixture();
+        Assert.Null(fixture.Snapshot("a").OpenUntil);
+        fixture.Trip("a");
+        var openedAt = fixture.Clock.GetUtcNow();
+        Assert.Equal(openedAt.AddSeconds(30), fixture.Snapshot("a").OpenUntil);
+        Assert.False(fixture.Snapshot("a").HalfOpen);
+        fixture.Clock.Advance(TimeSpan.FromSeconds(30));
+        Assert.True(fixture.Snapshot("a").HalfOpen);
+        fixture.Finish("a", HealthOutcome.Success);
+        Assert.Null(fixture.Snapshot("a").OpenUntil);
+        Assert.False(fixture.Snapshot("a").HalfOpen);
+    }
+
+    [Fact]
     public void FailedProbesDoubleOpenTimeUpToFiveMinutes()
     {
         var fixture = new Fixture();

@@ -177,7 +177,7 @@ public sealed class RequestInputTests
     public async Task DeclaredOversizedBodyIsRejectedBeforeReading()
     {
         var context = Context("/openai/deployments/gpt-4o/chat/completions", "{}");
-        context.Request.ContentLength = RequestInput.MaximumBodyBytes + 1;
+        context.Request.ContentLength = RequestInput.DefaultMaximumBodyBytes + 1;
         Assert.Null(await RequestInput.ReadAsync(context, CancellationToken.None));
         Assert.Equal(413, context.Response.StatusCode);
         Assert.Equal(0, context.Request.Body.Position);
@@ -187,19 +187,19 @@ public sealed class RequestInputTests
     public async Task ChunkedBodyLimitRejectsExtraByteWithoutTrustingContentLength()
     {
         var context = Context("/openai/deployments/gpt-4o/audio/transcriptions", "");
-        context.Request.Body = new MemoryStream(new byte[RequestInput.MaximumBodyBytes + 100]);
+        context.Request.Body = new MemoryStream(new byte[RequestInput.DefaultMaximumBodyBytes + 100]);
         Assert.Null(await RequestInput.ReadAsync(context, CancellationToken.None));
         Assert.Equal(413, context.Response.StatusCode);
-        Assert.Equal(RequestInput.MaximumBodyBytes + 1, context.Request.Body.Position);
+        Assert.Equal(RequestInput.DefaultMaximumBodyBytes + 1, context.Request.Body.Position);
     }
 
     [Fact]
     public async Task MaximumSizeAzureBodyIsAllowedWithoutJsonParsingRequirement()
     {
         var context = Context("/openai/deployments/gpt-4o/audio/transcriptions", "");
-        context.Request.Body = new MemoryStream(new byte[RequestInput.MaximumBodyBytes]);
+        context.Request.Body = new MemoryStream(new byte[RequestInput.DefaultMaximumBodyBytes]);
         var input = Assert.IsType<RequestInput>(await RequestInput.ReadAsync(context, CancellationToken.None));
-        Assert.Equal(RequestInput.MaximumBodyBytes, input.Body.Length);
+        Assert.Equal(RequestInput.DefaultMaximumBodyBytes, input.Body.Length);
         Assert.False(input.Streaming);
     }
 

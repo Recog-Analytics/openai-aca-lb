@@ -7,6 +7,8 @@ public sealed class DiscoveryOptions
     public string[] Scopes { get; init; } = [];
     public string OverridesFilePath { get; init; } = "";
     public string CallersFilePath { get; init; } = "";
+    public string ArmEndpoint { get; init; } = "https://management.azure.com";
+    public TimeSpan RefreshInterval { get; init; } = TimeSpan.FromMinutes(5);
 }
 
 public sealed record DiscoveryScope(string ResourceId, string SubscriptionId)

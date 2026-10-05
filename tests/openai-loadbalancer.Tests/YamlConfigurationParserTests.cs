@@ -149,4 +149,31 @@ public class YamlConfigurationParserTests
     {
         Assert.Empty(parser.ParseCallers("").Callers);
     }
+
+    [Fact]
+    public void ParsesAliasesWithCaseInsensitiveNames()
+    {
+        var config = parser.ParseOverrides("""
+            aliases:
+              chat: gpt-4o@2024-11-20
+              embedding: text-embedding-3-large
+            """);
+        Assert.Equal("gpt-4o@2024-11-20", config.Aliases["chat"]);
+        Assert.Equal("text-embedding-3-large", config.Aliases["embedding"]);
+    }
+
+    [Theory]
+    [InlineData("aliases: { chat: gpt-4o, CHAT: gpt-4o }")]
+    [InlineData("aliases: { chat: gpt-4o, chat: o3 }")]
+    [InlineData("aliases: { chat: '' }")]
+    [InlineData("aliases: { chat: '@1' }")]
+    [InlineData("aliases: { chat: 'gpt-4o@' }")]
+    [InlineData("aliases: { chat: 'gpt-4o@1@2' }")]
+    [InlineData("aliases: { 'chat@1': gpt-4o }")]
+    [InlineData("aliases: { '': gpt-4o }")]
+    [InlineData("aliases: { chat: null }")]
+    public void RejectsInvalidAliases(string yaml)
+    {
+        Assert.ThrowsAny<Exception>(() => parser.ParseOverrides(yaml));
+    }
 }

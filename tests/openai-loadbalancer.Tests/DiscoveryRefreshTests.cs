@@ -187,6 +187,22 @@ public class DiscoveryRefreshTests
     }
 
     [Fact]
+    public async Task AliasShadowingDiscoveredModelNameFailsRefresh()
+    {
+        using var fixture = new Fixture();
+        Assert.True(await fixture.Service.RefreshAsync());
+        var previous = fixture.State.Current;
+        await File.WriteAllTextAsync(Path.Combine(fixture.DirectoryPath, "overrides.yaml"), """
+            aliases:
+              GPT-4o: gpt-4o@2024-11-20
+            """);
+        Assert.False(await fixture.Service.RefreshAsync());
+        Assert.Same(previous, fixture.State.Current);
+        Assert.Contains(fixture.Logger.Entries, entry => entry.Level == LogLevel.Error &&
+            entry.Exception?.Message.Contains("Aliases cannot equal a discovered model name: GPT-4o") == true);
+    }
+
+    [Fact]
     public async Task BuilderFailureKeepsSnapshot()
     {
         using var fixture = new Fixture();

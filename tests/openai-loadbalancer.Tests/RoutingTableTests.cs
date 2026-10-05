@@ -234,4 +234,75 @@ public class RoutingTableTests
         Assert.Empty(Build().Deployments);
         Assert.False(Build().ResolveModel("gpt-4o").Success);
     }
+
+    [Theory]
+    [InlineData("chat", "2024-11-20")]
+    [InlineData("CHAT", "2024-11-20")]
+    [InlineData("latest", "2024-08-06")]
+    public void ResolvesAliasesCaseInsensitivelyBeforeModelNames(string requested, string version)
+    {
+        var overrides = new RoutingOverrides
+        {
+            DefaultVersions = new() { ["gpt-4o"] = "2024-08-06" },
+            Aliases = new() { ["chat"] = "gpt-4o@2024-11-20", ["latest"] = "gpt-4o" }
+        };
+        var table = Build(overrides, Discover(), Discover("older", "2024-08-06"));
+        Assert.Equal(new ModelKey("gpt-4o", version), table.ResolveModel(requested).Key);
+    }
+
+    [Fact]
+    public void AliasToUnavailableModelReturnsResolutionError()
+    {
+        var overrides = new RoutingOverrides { Aliases = new() { ["chat"] = "gpt-4o@missing" } };
+        Assert.False(Build(overrides, Discover()).ResolveModel("chat").Success);
+    }
+
+    [Theory]
+    [InlineData("gpt-4o")]
+    [InlineData("GPT-4O")]
+    public void AliasEqualToDiscoveredModelNameFailsBuild(string alias)
+    {
+        var overrides = new RoutingOverrides { Aliases = new() { [alias] = "o3@1" } };
+        var error = Assert.Throws<ArgumentException>(() => Build(overrides, Discover(), Discover("o3", "1", model: "o3")));
+        Assert.Contains(alias, error.Message);
+    }
+
+    [Fact]
+    public void DeploymentNameResolvesToPoolOfThatNameOnly()
+    {
+        var table = Build(null, Discover("llm-gpt-4omini", account: "west", model: "gpt-4o-mini"),
+            Discover("LLM-GPT-4OMINI", account: "france", model: "gpt-4o-mini"),
+            Discover("llm-gpt-4omini-public", account: "west", model: "gpt-4o-mini"));
+        var result = table.ResolveModel("llm-gpt-4omini");
+        Assert.Equal(PoolKind.Deployment, result.Pool?.Kind);
+        Assert.Equal(new ModelKey("gpt-4o-mini", "2024-11-20"), result.Key);
+        Assert.Equal(new[] { "west", "france" }, table.GetDeployments(result.Pool!.Value).Select(item => item.AccountName));
+        Assert.Equal("llm-gpt-4omini-public",
+            Assert.Single(table.GetDeployments(table.ResolveModel("llm-gpt-4omini-public").Pool!.Value)).DeploymentName);
+    }
+
+    [Fact]
+    public void ResolutionOrderIsModelKeyThenAliasThenDeploymentName()
+    {
+        var overrides = new RoutingOverrides { Aliases = new() { ["legacy"] = "o3-pool", ["mini"] = "gpt-4o" } };
+        var table = Build(overrides, Discover("gpt-4o", account: "named-like-model", model: "o3"),
+            Discover("legacy", account: "a"), Discover("o3-pool", account: "b", model: "o3"), Discover("mini", account: "c"));
+        Assert.Equal(PoolKind.Model, table.ResolveModel("gpt-4o").Pool?.Kind);
+        Assert.Equal(new RoutingPool(PoolKind.Deployment, "o3-pool"), table.ResolveModel("legacy").Pool);
+        Assert.Equal(RoutingPool.For(new ModelKey("gpt-4o", "2024-11-20")), table.ResolveModel("MINI").Pool);
+        Assert.False(table.ResolveModel("missing").Success);
+    }
+
+    [Fact]
+    public void MixedModelDeploymentNameRoutesToPoolAndWarns()
+    {
+        var logger = new TestLogger<RoutingTableBuilder>();
+        var table = new RoutingTableBuilder(logger).Build([Discover("shared", account: "a"),
+            Discover("shared", "2024-08-06", account: "b")], Geography, new RoutingOverrides());
+        var result = table.ResolveModel("shared");
+        Assert.Null(result.Key);
+        Assert.Equal(2, table.GetDeployments(result.Pool!.Value).Count);
+        Assert.Contains(logger.Entries, entry => entry.Level == LogLevel.Warning && entry.Message.Contains("shared") &&
+            entry.Message.Contains("gpt-4o@2024-08-06, gpt-4o@2024-11-20"));
+    }
 }

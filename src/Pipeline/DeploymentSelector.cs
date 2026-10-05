@@ -7,7 +7,7 @@ public sealed record SelectionResult(Deployment? Deployment, HealthAttempt? Atte
 
 public interface IDeploymentSelector
 {
-    SelectionResult Select(RoutingTable table, ModelKey model, string zone, IReadOnlySet<string> tried);
+    SelectionResult Select(RoutingTable table, RoutingPool pool, string zone, IReadOnlySet<string> tried);
 }
 
 public interface ISelectionRandom
@@ -24,10 +24,10 @@ public sealed class DeploymentSelector(IHealthState health, ISelectionRandom? ra
 {
     private readonly ISelectionRandom random = random ?? new SelectionRandom();
 
-    public SelectionResult Select(RoutingTable table, ModelKey model, string zone, IReadOnlySet<string> tried)
+    public SelectionResult Select(RoutingTable table, RoutingPool pool, string zone, IReadOnlySet<string> tried)
     {
         var triedIds = new HashSet<string>(tried, StringComparer.OrdinalIgnoreCase);
-        var candidates = table.GetDeployments(model).Where(deployment =>
+        var candidates = table.GetDeployments(pool).Where(deployment =>
             !deployment.Disabled && deployment.Weight > 0 && !triedIds.Contains(deployment.Id) &&
             (zone == "global" || deployment.Zone == zone)).ToArray();
         var rejected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

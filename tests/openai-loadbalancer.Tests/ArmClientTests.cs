@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using Azure.Core;
+using Microsoft.Extensions.Options;
 using openai_loadbalancer.Discovery;
 
 namespace openai_loadbalancer.Tests;
@@ -24,7 +25,7 @@ public class ArmClientTests
             """);
         using var http = new HttpClient(handler);
         var credential = new FakeCredential();
-        var client = new ArmClient(http, credential);
+        var client = new ArmClient(http, credential, Options.Create(new DiscoveryOptions()));
         var scope = DiscoveryScope.Parse(resourceGroup
             ? $"/subscriptions/{DiscoveryRefreshTests.Subscription}/resourceGroups/test-rg" : DiscoveryRefreshTests.Subscription);
         var accounts = await client.GetAccountsAsync(scope, CancellationToken.None);
@@ -54,7 +55,7 @@ public class ArmClientTests
             {"value":[{"name":"global","sku":{"name":"GlobalStandard","capacity":20},"properties":{"provisioningState":"Succeeded","model":{"name":"o3","version":"2025-04-16"}}}]}
             """);
         using var http = new HttpClient(handler);
-        var client = new ArmClient(http, new FakeCredential());
+        var client = new ArmClient(http, new FakeCredential(), Options.Create(new DiscoveryOptions()));
         var deployments = await client.GetDeploymentsAsync(DiscoveryRefreshTests.Account, CancellationToken.None);
         Assert.Equal(2, deployments.Count);
         var deployment = deployments[0];
@@ -84,7 +85,7 @@ public class ArmClientTests
             ]}
             """);
         using var http = new HttpClient(handler);
-        var client = new ArmClient(http, new FakeCredential());
+        var client = new ArmClient(http, new FakeCredential(), Options.Create(new DiscoveryOptions()));
         var locations = await client.GetLocationsAsync(DiscoveryRefreshTests.Subscription, CancellationToken.None);
         Assert.Equal(2, locations.Count);
         Assert.Equal("Europe", locations["WESTEUROPE"]);
@@ -102,7 +103,7 @@ public class ArmClientTests
         using var handler = new FakeHandler();
         handler.Responses.Enqueue($$"""{"value":[],"nextLink":"{{nextLink}}"}""");
         using var http = new HttpClient(handler);
-        var client = new ArmClient(http, new FakeCredential());
+        var client = new ArmClient(http, new FakeCredential(), Options.Create(new DiscoveryOptions()));
         await Assert.ThrowsAsync<InvalidOperationException>(() => client.GetLocationsAsync(DiscoveryRefreshTests.Subscription, CancellationToken.None));
         Assert.Single(handler.Requests);
     }
@@ -113,9 +114,48 @@ public class ArmClientTests
         using var handler = new FakeHandler();
         handler.Responses.Enqueue($$"""{"value":[],"nextLink":"https://management.azure.com/subscriptions/{{DiscoveryRefreshTests.Subscription}}/locations?api-version=2022-12-01"}""");
         using var http = new HttpClient(handler);
-        var client = new ArmClient(http, new FakeCredential());
+        var client = new ArmClient(http, new FakeCredential(), Options.Create(new DiscoveryOptions()));
         await Assert.ThrowsAsync<InvalidOperationException>(() => client.GetLocationsAsync(DiscoveryRefreshTests.Subscription, CancellationToken.None));
         Assert.Single(handler.Requests);
+    }
+
+    [Theory]
+    [InlineData("http://localhost:5100", "http://localhost:5100/next?page=2")]
+    [InlineData("https://arm.example:8443", "/next?page=2")]
+    public async Task UsesConfiguredEndpointForInitialRequestAndPagination(string endpoint, string nextLink)
+    {
+        using var handler = new FakeHandler();
+        handler.Responses.Enqueue($$"""{"value":[],"nextLink":"{{nextLink}}"}""");
+        handler.Responses.Enqueue("""{"value":[]}""");
+        using var http = new HttpClient(handler);
+        var credential = new FakeCredential();
+        var client = new ArmClient(http, credential, Options.Create(new DiscoveryOptions { ArmEndpoint = endpoint }));
+
+        await client.GetLocationsAsync(DiscoveryRefreshTests.Subscription, CancellationToken.None);
+
+        Assert.Equal(new Uri(endpoint + $"/subscriptions/{DiscoveryRefreshTests.Subscription}/locations?api-version=2022-12-01"), handler.Requests[0].Uri);
+        Assert.Equal(new Uri(endpoint + "/next?page=2"), handler.Requests[1].Uri);
+        Assert.All(handler.Requests, request => Assert.Equal("Bearer test-token", request.Authorization));
+        Assert.All(credential.Scopes, scopes => Assert.Equal(["https://management.azure.com/.default"], scopes));
+    }
+
+    [Theory]
+    [InlineData("https://localhost:5100/next")]
+    [InlineData("http://localhost:5101/next")]
+    [InlineData("http://elsewhere:5100/next")]
+    [InlineData("http://user@localhost:5100/next")]
+    public async Task RejectsPaginationOutsideConfiguredEndpointBeforeSendingToken(string nextLink)
+    {
+        using var handler = new FakeHandler();
+        handler.Responses.Enqueue($$"""{"value":[],"nextLink":"{{nextLink}}"}""");
+        using var http = new HttpClient(handler);
+        var credential = new FakeCredential();
+        var client = new ArmClient(http, credential, Options.Create(new DiscoveryOptions { ArmEndpoint = "http://localhost:5100" }));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.GetLocationsAsync(DiscoveryRefreshTests.Subscription, CancellationToken.None));
+
+        Assert.Single(handler.Requests);
+        Assert.Single(credential.Scopes);
     }
 
     [Theory]
@@ -127,7 +167,7 @@ public class ArmClientTests
         using var handler = new FakeHandler { Status = status };
         handler.Responses.Enqueue("{}");
         using var http = new HttpClient(handler);
-        var client = new ArmClient(http, new FakeCredential());
+        var client = new ArmClient(http, new FakeCredential(), Options.Create(new DiscoveryOptions()));
         var exception = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetLocationsAsync(DiscoveryRefreshTests.Subscription, CancellationToken.None));
         Assert.Equal(status, exception.StatusCode);
     }
@@ -138,7 +178,7 @@ public class ArmClientTests
         using var handler = new FakeHandler();
         handler.Responses.Enqueue("{}");
         using var http = new HttpClient(handler);
-        var client = new ArmClient(http, new FakeCredential());
+        var client = new ArmClient(http, new FakeCredential(), Options.Create(new DiscoveryOptions()));
         await Assert.ThrowsAsync<KeyNotFoundException>(() => client.GetLocationsAsync(DiscoveryRefreshTests.Subscription, CancellationToken.None));
     }
 

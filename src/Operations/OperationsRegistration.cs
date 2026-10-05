@@ -27,13 +27,14 @@ public static class OperationsRegistration
         services.AddSingleton<ISlackAlerts>(provider => provider.GetRequiredService<SlackAlerts>());
         services.AddHostedService(provider => provider.GetRequiredService<SlackAlerts>());
         services.TryAddSingleton<OperationsTelemetry>();
+        services.TryAddSingleton<RequestHistory>();
         services.AddSingleton<IHealthObserver>(provider => provider.GetRequiredService<OperationsTelemetry>());
 
         var connectionString = configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"];
         var telemetry = services.AddOpenTelemetry().ConfigureResource(resource => resource.AddService("openai-loadbalancer"))
             .WithMetrics(metrics =>
             {
-                metrics.AddMeter(OperationsTelemetry.MeterName);
+                metrics.AddMeter(OperationsTelemetry.MeterName, Dashboard.DashboardEventBuffer.MeterName);
                 if (!string.IsNullOrWhiteSpace(connectionString))
                     metrics.AddAzureMonitorMetricExporter(options => options.ConnectionString = connectionString);
             });

@@ -1,6 +1,5 @@
-using Azure.Core;
-using Azure.Identity;
 using openai_loadbalancer.Configuration;
+using openai_loadbalancer.Credentials;
 using openai_loadbalancer.Health;
 using openai_loadbalancer.Routing;
 
@@ -10,14 +9,19 @@ public static class DiscoveryRegistration
 {
     public static IServiceCollection AddDiscovery(this IServiceCollection services, IConfiguration configuration)
     {
-        services.Configure<DiscoveryOptions>(configuration.GetSection(DiscoveryOptions.SectionName));
-        services.AddSingleton<TokenCredential>(_ =>
-        {
-            var clientId = configuration["AZURE_CLIENT_ID"];
-            var identity = string.IsNullOrWhiteSpace(clientId) ? ManagedIdentityId.SystemAssigned
-                : ManagedIdentityId.FromUserAssignedClientId(clientId);
-            return new ManagedIdentityCredential(identity);
-        });
+        services.AddOptions<DiscoveryOptions>().Bind(configuration.GetSection(DiscoveryOptions.SectionName))
+            .Validate<IHostEnvironment>((options, environment) =>
+                Uri.TryCreate(options.ArmEndpoint, UriKind.Absolute, out var endpoint) &&
+                (endpoint.Scheme == Uri.UriSchemeHttps ||
+                    endpoint.Scheme == Uri.UriSchemeHttp && environment.IsDevelopment()) &&
+                endpoint.Host.Length > 0 && endpoint.UserInfo.Length == 0 &&
+                endpoint.AbsolutePath == "/" && endpoint.Query.Length == 0 && endpoint.Fragment.Length == 0,
+                "Discovery:ArmEndpoint must be an HTTPS origin; HTTP is allowed only in Development.")
+            .Validate(options => options.RefreshInterval.TotalMilliseconds >= 1 &&
+                options.RefreshInterval.TotalMilliseconds <= uint.MaxValue - 1,
+                "Discovery:RefreshInterval must be at least one millisecond and fit the supported timer range.")
+            .ValidateOnStart();
+        services.AddAzureCredential(configuration);
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton<IHealthState, HealthState>();
         services.AddSingleton<IRetryBudget, RetryBudget>();

@@ -1,13 +1,14 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
 using Azure.Core;
+using Microsoft.Extensions.Options;
 using openai_loadbalancer.Routing;
 
 namespace openai_loadbalancer.Discovery;
 
-public sealed class ArmClient(HttpClient httpClient, TokenCredential credential) : IArmClient
+public sealed class ArmClient(HttpClient httpClient, TokenCredential credential, IOptions<DiscoveryOptions> options) : IArmClient
 {
-    private static readonly Uri ManagementEndpoint = new("https://management.azure.com");
+    private readonly Uri managementEndpoint = new(options.Value.ArmEndpoint, UriKind.Absolute);
     private static readonly TokenRequestContext TokenContext = new(["https://management.azure.com/.default"]);
     private const string CognitiveServicesApiVersion = "2024-10-01";
 
@@ -59,11 +60,11 @@ public sealed class ArmClient(HttpClient httpClient, TokenCredential credential)
     private async Task<List<JsonElement>> GetListAsync(string path, CancellationToken cancellationToken)
     {
         var items = new List<JsonElement>();
-        Uri? next = new(ManagementEndpoint, path);
+        Uri? next = new(managementEndpoint, path);
         var visited = new HashSet<Uri>();
         while (next != null)
         {
-            if (next.Scheme != Uri.UriSchemeHttps || next.Authority != ManagementEndpoint.Authority ||
+            if (next.Scheme != managementEndpoint.Scheme || next.Authority != managementEndpoint.Authority ||
                 next.UserInfo.Length != 0 || !visited.Add(next))
                 throw new InvalidOperationException("ARM returned an invalid or repeated pagination URL.");
 
@@ -76,7 +77,7 @@ public sealed class ArmClient(HttpClient httpClient, TokenCredential credential)
             using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
             items.AddRange(document.RootElement.GetProperty("value").EnumerateArray().Select(item => item.Clone()));
             var link = document.RootElement.TryGetProperty("nextLink", out var nextLink) ? nextLink.GetString() : null;
-            next = string.IsNullOrWhiteSpace(link) ? null : new Uri(ManagementEndpoint, link);
+            next = string.IsNullOrWhiteSpace(link) ? null : new Uri(managementEndpoint, link);
         }
         return items;
     }

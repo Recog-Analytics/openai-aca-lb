@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.AspNetCore.Http.Features;
 using openai_loadbalancer.Discovery;
 using openai_loadbalancer.Routing;
 
@@ -10,7 +11,7 @@ namespace openai_loadbalancer.Pipeline;
 
 public sealed class RequestInput
 {
-    public const int MaximumBodyBytes = 16 * 1024 * 1024;
+    public const int DefaultMaximumBodyBytes = 26 * 1024 * 1024;
     private const string DeploymentPrefix = "/openai/deployments/";
     private readonly string originalPath;
     private readonly bool v1;
@@ -77,13 +78,17 @@ public sealed class RequestInput
         return zone != null && caller.Zones.Contains(zone, StringComparer.Ordinal) ? zone : null;
     }
 
-    public static async Task<RequestInput?> ReadAsync(HttpContext context, CancellationToken cancellationToken)
+    public static async Task<RequestInput?> ReadAsync(HttpContext context, CancellationToken cancellationToken,
+        int maximumBodyBytes = DefaultMaximumBodyBytes)
     {
-        if (context.Request.ContentLength > MaximumBodyBytes)
+        if (context.Request.ContentLength > maximumBodyBytes)
         {
             context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
             return null;
         }
+        // The server limit sits one byte above ours, so this method reports oversized bodies itself.
+        if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } limit)
+            limit.MaxRequestBodySize = maximumBodyBytes + 1L;
         var path = context.Request.Path.Value ?? "";
         if (path.Contains('\\') || path.Split('/').Any(segment => segment is "." or ".."))
         {
@@ -110,9 +115,9 @@ public sealed class RequestInput
             while (true)
             {
                 var count = await context.Request.Body.ReadAsync(buffer.AsMemory(0,
-                    Math.Min(buffer.Length, MaximumBodyBytes - (int)buffered.Length + 1)), cancellationToken);
+                    Math.Min(buffer.Length, maximumBodyBytes - (int)buffered.Length + 1)), cancellationToken);
                 if (count == 0) break;
-                if (buffered.Length + count > MaximumBodyBytes)
+                if (buffered.Length + count > maximumBodyBytes)
                 {
                     context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
                     return null;
