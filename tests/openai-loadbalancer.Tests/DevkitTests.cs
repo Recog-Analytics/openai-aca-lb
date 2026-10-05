@@ -132,6 +132,8 @@ public class DevkitTests(ITestOutputHelper output)
         Assert.Equal(status, (int)response.StatusCode);
         using var json = await ReadJson(response);
         Assert.Equal(code, json.RootElement.GetProperty("error").GetProperty("code").GetString());
+        Assert.False(string.IsNullOrEmpty(json.RootElement.GetProperty("error").GetProperty("message").GetString()));
+        Assert.True(Guid.TryParse(Assert.Single(response.Headers.GetValues("apim-request-id")), out _));
         if (control == "throttle") Assert.Equal("1234", Assert.Single(response.Headers.GetValues("retry-after-ms")));
     }
 

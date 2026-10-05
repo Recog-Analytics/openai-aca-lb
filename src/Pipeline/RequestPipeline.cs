@@ -49,13 +49,19 @@ public sealed class RequestPipeline(DiscoveryState discovery, IDeploymentSelecto
                 observation.Attempts.Select(attempt => new RequestAttemptRecord(attempt.Deployment.DeploymentName,
                     attempt.Deployment.AccountName, attempt.Deployment.Region, attempt.Deployment.Tier,
                     attempt.Transformer.Status, attempt.Transformer.Ttfb?.TotalMilliseconds,
-                    attempt.Outcome.ToString(), attempt.RetryReason, attempt.Deployment.Id)).ToArray(), outcome,
-                observation.Pool?.KindName, observation.Pool?.Name));
+                    attempt.Outcome.ToString(), attempt.RetryReason, attempt.Deployment.Id,
+                    ErrorCode: attempt.Transformer.ErrorCode, ErrorMessage: attempt.Transformer.ErrorMessage,
+                    BackendRequestId: attempt.Transformer.BackendRequestId)).ToArray(), outcome,
+                observation.Pool?.KindName, observation.Pool?.Name,
+                Operation: observation.Operation, ApiVersion: observation.ApiVersion,
+                RequestBytes: observation.RequestBytes, MaxOutputTokens: observation.MaxOutputTokens));
         }
     }
 
     private async Task InvokeCoreAsync(HttpContext context, RequestObservation observation)
     {
+        observation.Operation = RequestInput.OperationFor(context.Request.Path.Value ?? "");
+        observation.ApiVersion = RequestInput.ApiVersionFor(context.Request.Query);
         var snapshot = discovery.Current;
         if (snapshot == null)
         {
@@ -101,6 +107,8 @@ public sealed class RequestPipeline(DiscoveryState discovery, IDeploymentSelecto
                 return;
             observation.RequestedModel = input.RequestedModel;
             observation.Streaming = input.Streaming;
+            observation.RequestBytes = input.Body.Length;
+            observation.MaxOutputTokens = input.MaxOutputTokens;
             var model = snapshot.Table.ResolveModel(input.RequestedModel);
             if (!model.Success)
             {
@@ -166,7 +174,7 @@ public sealed class RequestPipeline(DiscoveryState discovery, IDeploymentSelecto
                 using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token, ttfbTimer.Token);
                 var transformer = new AttemptTransformer(deployment, input, token, attempts, healthAttempt, clock,
                     ttfbTimer, deadlineTimer, PrepareRetry, duration => telemetry.RecordTtfb(caller.Name, deployment, duration),
-                    duration => telemetry.RecordThrottle(caller.Name, deployment, duration));
+                    duration => telemetry.RecordThrottle(caller.Name, deployment, duration), () => expiresAt - clock.GetUtcNow());
                 var attempt = new AttemptObservation(deployment, transformer);
                 observation.Attempts.Add(attempt);
                 var error = await forwarder.SendAsync(context, deployment.Endpoint.AbsoluteUri, transport,
@@ -269,6 +277,10 @@ public sealed class RequestPipeline(DiscoveryState discovery, IDeploymentSelecto
         public string? RequestedModel { get; set; }
         public string? Zone { get; set; }
         public bool Streaming { get; set; }
+        public string? Operation { get; set; }
+        public string? ApiVersion { get; set; }
+        public long? RequestBytes { get; set; }
+        public int? MaxOutputTokens { get; set; }
         public List<AttemptObservation> Attempts { get; } = [];
     }
 

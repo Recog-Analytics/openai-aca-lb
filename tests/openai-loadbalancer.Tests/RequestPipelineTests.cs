@@ -21,7 +21,7 @@ using openai_loadbalancer.Routing;
 
 namespace openai_loadbalancer.Tests;
 
-public class RequestPipelineTests
+public partial class RequestPipelineTests
 {
     private const string Model = "gpt-4o@2024-11-20";
     private const string Key = "lbk_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";

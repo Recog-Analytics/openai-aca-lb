@@ -15,6 +15,8 @@ public static class FakeAccount
     private static async Task Respond(HttpContext context, string accountName, string? name, bool embeddings, ScenarioState state)
     {
         var cancel = context.RequestAborted;
+        // Azure sends a request ID on every response; the LB records it for support.
+        context.Response.Headers["apim-request-id"] = Guid.NewGuid().ToString();
         JsonDocument document;
         try { document = await JsonDocument.ParseAsync(context.Request.Body, cancellationToken: cancel); }
         catch (JsonException)
@@ -40,7 +42,7 @@ public static class FakeAccount
             context.Response.Headers["x-ratelimit-remaining-tokens"] = "100000";
             if (deployment == null)
             {
-                await Error(context, 404, "DeploymentNotFound", "Unknown deployment.");
+                await Error(context, 404, "DeploymentNotFound", "The API deployment for this resource does not exist.");
                 return;
             }
             var controls = deployment.Controls;
@@ -54,12 +56,12 @@ public static class FakeAccount
             if (outcome < controls.ThrottleRate)
             {
                 context.Response.Headers["retry-after-ms"] = controls.RetryAfterMs.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                await Error(context, 429, "RateLimitExceeded", "Simulated throttling.");
+                await Error(context, 429, "RateLimitExceeded", $"Requests to the deployment {name} have exceeded the token rate limit of your current pricing tier. Please retry after {Math.Max(1, controls.RetryAfterMs / 1000)} seconds. (simulated)");
                 return;
             }
             if (outcome < controls.ThrottleRate + controls.ErrorRate)
             {
-                await Error(context, 500, "InternalServerError", "Simulated failure.");
+                await Error(context, 500, "InternalServerError", "The server had an error while processing your request. Sorry about that! (simulated)");
                 return;
             }
             if (embeddings)

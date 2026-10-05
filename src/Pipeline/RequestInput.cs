@@ -16,10 +16,11 @@ public sealed class RequestInput
     private readonly string originalPath;
     private readonly bool v1;
 
-    private RequestInput(string requestedModel, bool streaming, byte[] body, string path, bool v1)
+    private RequestInput(string requestedModel, bool streaming, int? maxOutputTokens, byte[] body, string path, bool v1)
     {
         RequestedModel = requestedModel;
         Streaming = streaming;
+        MaxOutputTokens = maxOutputTokens;
         Body = body;
         originalPath = path;
         this.v1 = v1;
@@ -27,7 +28,44 @@ public sealed class RequestInput
 
     public string RequestedModel { get; }
     public bool Streaming { get; }
+    public int? MaxOutputTokens { get; }
     public byte[] Body { get; }
+
+    public static string OperationFor(string path)
+    {
+        string rest;
+        if (path.StartsWith(DeploymentPrefix, StringComparison.Ordinal))
+        {
+            var segmentEnd = path.IndexOf('/', DeploymentPrefix.Length);
+            rest = segmentEnd < 0 ? "" : path[segmentEnd..];
+        }
+        else if (path.StartsWith("/openai/v1/", StringComparison.Ordinal)) rest = path["/openai/v1".Length..];
+        else if (path.StartsWith("/v1/", StringComparison.Ordinal)) rest = path["/v1".Length..];
+        else if (path.StartsWith("/openai/", StringComparison.Ordinal)) rest = path["/openai".Length..];
+        else rest = path;
+        return rest.Split('/', StringSplitOptions.RemoveEmptyEntries) switch
+        {
+            ["chat", "completions", ..] => "chat.completions",
+            ["completions", ..] => "completions",
+            ["responses", ..] => "responses",
+            ["embeddings", ..] => "embeddings",
+            ["audio", "transcriptions", ..] => "audio.transcriptions",
+            ["audio", "translations", ..] => "audio.translations",
+            ["audio", "speech", ..] => "audio.speech",
+            ["images", "generations", ..] => "images.generations",
+            ["images", "edits", ..] => "images.edits",
+            ["images", "variations", ..] => "images.variations",
+            ["realtime", ..] => "realtime",
+            ["files", ..] => "files",
+            ["batches", ..] => "batches",
+            ["models", ..] => "models",
+            _ => "other"
+        };
+    }
+
+    public static string? ApiVersionFor(IQueryCollection query) =>
+        query.TryGetValue("api-version", out var values) && values.Count == 1 && values[0] is { Length: >= 1 and <= 32 } version &&
+        version.All(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '-') ? version : null;
 
     public static DiscoveredCaller? Authenticate(IHeaderDictionary headers, IReadOnlyList<DiscoveredCaller> callers)
     {
@@ -132,6 +170,7 @@ public sealed class RequestInput
 
         var body = buffered.ToArray();
         var streaming = false;
+        int? maxOutputTokens = null;
         try
         {
             if (body.Length != 0)
@@ -144,6 +183,8 @@ public sealed class RequestInput
                 else
                 {
                     streaming = json.RootElement.TryGetProperty("stream", out var stream) && stream.ValueKind == JsonValueKind.True;
+                    maxOutputTokens = OutputLimit(json.RootElement, "max_completion_tokens") ?? OutputLimit(json.RootElement, "max_tokens")
+                        ?? OutputLimit(json.RootElement, "max_output_tokens");
                     if (isV1)
                     {
                         model = json.RootElement.TryGetProperty("model", out var modelValue) && modelValue.ValueKind == JsonValueKind.String
@@ -164,7 +205,7 @@ public sealed class RequestInput
             context.Response.StatusCode = StatusCodes.Status400BadRequest;
             return null;
         }
-        return new RequestInput(model, streaming, body, path, isV1);
+        return new RequestInput(model, streaming, maxOutputTokens, body, path, isV1);
     }
 
     public byte[] BodyFor(Deployment deployment)
@@ -183,6 +224,10 @@ public sealed class RequestInput
         return PathString.FromUriComponent(DeploymentPrefix + Uri.EscapeDataString(deployment.DeploymentName))
             .Add(new PathString(suffix));
     }
+
+    private static int? OutputLimit(JsonElement body, string name) =>
+        body.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var limit) && limit >= 0
+            ? limit : null;
 
     private static bool ValidKey(string? key)
     {
