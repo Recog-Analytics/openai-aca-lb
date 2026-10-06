@@ -1,6 +1,6 @@
 # Load balancing design
 
-Status: agreed, not implemented. Replaces the static `BACKEND_n_*` model.
+Status: implemented. Replaces the static `BACKEND_n_*` model.
 
 ## Goals
 
