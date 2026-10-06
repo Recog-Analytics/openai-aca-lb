@@ -1,6 +1,6 @@
 # Local devkit design
 
-Status: agreed, not implemented. Goal: run the load balancer (LB) locally against simulated Azure, control failure modes per region, and watch routing live.
+Status: implemented. Goal: run the load balancer (LB) locally against simulated Azure, control failure modes per region, and watch routing live.
 
 ## Phase A: LB changes
 

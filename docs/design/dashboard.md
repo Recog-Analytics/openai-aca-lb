@@ -1,6 +1,6 @@
 # Dashboard design
 
-Status: agreed, not implemented. Do not deploy yet.
+Status: implemented. Phases D1 to D6 run in production; the phase D7 changes (history, request context, scaling to 70+ deployments) still need deployment and live verification.
 
 A live, animated view of how the load balancer (LB) routes requests, for production and local use. It is a separate Container App. Anyone in the Entra tenant can view it.
 
@@ -31,6 +31,10 @@ Locally, `tools/devkit/run.sh` also starts the dashboard service (port 5200) and
   ],
   "counts": [                           // all requests since last batch, sampled or not
     { "deploymentId", "outcome", "count" }
+  ],
+  "routes": [                           // all requests since last batch, unsampled, grouped by route; absent from older LBs
+    { "caller", "modelKey", "zone", "status", "count", "poolKind", "pool",
+      "hops": [{ "deploymentId", "outcome" }] }
   ]
 }
 ```

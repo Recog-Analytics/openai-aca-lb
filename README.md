@@ -315,8 +315,8 @@ Request context: `operation` (path slug such as `chat.completions`, `responses`,
 `maxOutputTokens` comes from `max_completion_tokens`, then `max_tokens`, then `max_output_tokens`, integers only.
 Attempts include deployment/account names, region, tier, backend status, TTFB in milliseconds, health outcome, and retry reason.
 Attempts also include `backendRequestId` from `apim-request-id` or `x-request-id`, for Azure support cases.
-Failed attempts with a JSON error body include `errorCode` (max 64 characters) and `errorMessage` (max 300 characters).
-The LB reads at most the first 8 KiB of non-2xx JSON bodies for these fields. It never reads success bodies.
+Failed attempts with a JSON error body may include `errorCode` (max 64 characters) and `errorMessage` (max 300 characters).
+They come from a bounded read: at most the first 8 KiB of a non-2xx JSON body, for at most one second and half the remaining deadline. A field beyond that prefix, a body that is not complete JSON within it, or a body that stalls leaves the fields out. The LB never reads success bodies.
 Backend status and TTFB are null when no response headers arrive. Terminal attempts have no retry reason.
 `client_abort` and `failure` outcomes distinguish interrupted responses from ordinary HTTP errors.
 Total duration includes response streaming; active streams appear after completion or disconnect.
