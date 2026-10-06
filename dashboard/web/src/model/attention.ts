@@ -134,9 +134,10 @@ export function count(value: number): string {
   return compact.format(value);
 }
 
-/** Formats a request rate, in the unit that keeps it above 0.1: "12/s", "0.4/s", "0.5/min", "2/h". */
+/** Formats a request rate, in the unit that keeps it above 0.1: "12/s", "0.4/s", "0.5/min", "2/h", "< 0.1/h". */
 export function rate(perSecond: number): string {
   if (perSecond <= 0) return "0/s";
+  if (perSecond * 3600 < 0.1) return "<\u202f0.1/h";
   const [value, unit] = perSecond >= 0.1 ? [perSecond, "s"] : perSecond * 60 >= 0.1 ? [perSecond * 60, "min"] : [perSecond * 3600, "h"];
   return `${value.toFixed(value < 10 ? 1 : 0).replace(/\.0$/, "")}/${unit}`;
 }

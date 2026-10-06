@@ -297,7 +297,8 @@ describe("attention", () => {
 
   test("a low rate switches unit instead of rounding to zero", () => {
     // 8 requests in 15 minutes once read "0.0 req/s".
-    expect([rate(0), rate(8 / 900), rate(0.0005), rate(0.25), rate(1), rate(42.4)]).toEqual(["0/s", "0.5/min", "1.8/h", "0.3/s", "1/s", "42/s"]);
+    expect([rate(0), rate(8 / 900), rate(0.0005), rate(0.25), rate(1), rate(42.4), rate(1e-6)])
+      .toEqual(["0/s", "0.5/min", "1.8/h", "0.3/s", "1/s", "42/s", "<\u202f0.1/h"]);
     expect([count(8), count(940), count(1234), count(3_400_000)]).toEqual(["8", "940", "1.2K", "3.4M"]);
   });
 });

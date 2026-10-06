@@ -61,6 +61,8 @@ export function TopBar(props: Props) {
   const share = (f: Funnel | null, pick: (f: Funnel) => number) => (f && f.total > 0 ? pick(f) / f.total : null);
   const lost = (f: Funnel) => f.failed + f.refused;
   const spilled = (f: Funnel) => [...f.tiers.values()].reduce((sum, tier) => sum + tier.spilled, 0);
+  const perSecond = (f: Funnel | null) => (f && f.seconds > 0 ? f.total / f.seconds : null);
+  const requestRate = perSecond(funnel);
   return (
     <header className="top">
       <div className="toolbar">
@@ -134,8 +136,9 @@ export function TopBar(props: Props) {
               format={percent} unit="share" good="down" />
             <Kpi label="Spilled to a lower tier" detail={count(spilled(funnel))} value={share(funnel, spilled)} before={share(previous, spilled)}
               format={percent} unit="share" good="down" />
-            <Kpi label="Requests" detail={funnel.seconds > 0 ? rate(funnel.total / funnel.seconds) : null} value={funnel.total}
-              before={previous?.total ?? null} format={count} unit="count" />
+            {/* The windows can cover different seconds near the start of the history, so the change compares rates. */}
+            <Kpi label="Requests" detail={requestRate === null ? null : rate(requestRate)} value={funnel.total} before={null}
+              format={count} unit="count" compare={{ value: requestRate, before: perSecond(previous), format: rate }} />
           </dl>
           <p id="kpi-caption" className="kpi-caption">
             {viewing ? `${spanLabel(coveredSeconds)} to ${time(viewing.t)}` : `Last ${spanLabel(coveredSeconds)}`}
@@ -147,13 +150,19 @@ export function TopBar(props: Props) {
   );
 }
 
-/** One figure; `detail` follows the label in brackets: the request count behind a share, or the rate behind a count. */
-function Kpi({ label, detail, value, before, format, unit, good, alert }: {
+/**
+ * One figure; `detail` follows the label in brackets: the request count behind a share, or the rate behind a count.
+ * The change compares `value` with `before`, or the `compare` pair when given, formatted by its own `format`.
+ */
+function Kpi({ label, detail, value, before, format, unit, good, alert, compare }: {
   label: string; detail: string | null; value: number | null; before: number | null; format: (value: number) => string;
   unit: "count" | "share"; good?: "up" | "down"; alert?: boolean;
+  compare?: { value: number | null; before: number | null; format: (change: number) => string };
 }) {
-  const change = value !== null && before !== null ? value - before : null;
-  const significant = change !== null && (unit === "share" ? Math.abs(change) >= 0.01 : before !== null && before > 0 && Math.abs(change) / before >= 0.1);
+  const now = compare ? compare.value : value;
+  const then = compare ? compare.before : before;
+  const change = now !== null && then !== null ? now - then : null;
+  const significant = change !== null && (unit === "share" ? Math.abs(change) >= 0.01 : then !== null && then > 0 && Math.abs(change) / then >= 0.1);
   const direction = change !== null && change > 0 ? "up" : "down";
   const tone = !significant || !good ? "neutral" : direction === good ? "good" : "bad";
   return (
@@ -164,7 +173,7 @@ function Kpi({ label, detail, value, before, format, unit, good, alert }: {
         <span className="kpi-change" data-tone={tone}>
           {!significant || change === null ? "" : unit === "share"
             ? `${change > 0 ? "+" : "−"}${Math.round(Math.abs(change) * 100) || "<1"} pts`
-            : `${change > 0 ? "+" : "−"}${count(Math.abs(change))}`}
+            : `${change > 0 ? "+" : "−"}${(compare?.format ?? count)(Math.abs(change))}`}
         </span>
       </dd>
     </div>
