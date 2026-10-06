@@ -26,6 +26,8 @@ public sealed class DashboardHistory
     public const int MaxRequests = 20_000, MaxShapes = 10_000, MaxStrings = 20_000, MaxDeployments = 5_000, MaxText = 512;
     public const long MaxRequestBytes = 32L << 20;
     public const int NormalPerSecond = 4;
+    /// <summary>The live snapshot's request queue: what a browser keeps from deltas, 100 samples a second over two minutes.</summary>
+    public const int MaxRecentRequests = DashboardStore.BrowserSamplesPerSecond * 120;
     private static readonly TimeSpan Recent = TimeSpan.FromMinutes(2);
     public static readonly int[] Resolutions = [1, 10, 30, 60, 300, 600, 1800, 3600];
 
@@ -161,7 +163,7 @@ public sealed class DashboardHistory
             reservoirSeen = 0;
             reservoirSecond = second;
         }
-        while (recent.TryPeek(out var item) && (now - item.ReceivedAt >= Recent || recent.Count > MaxRequests || recentBytes > MaxRequestBytes))
+        while (recent.TryPeek(out var item) && (now - item.ReceivedAt >= Recent || recent.Count > MaxRecentRequests || recentBytes > MaxRequestBytes))
         {
             recent.Dequeue();
             recentBytes -= item.Bytes;
@@ -195,7 +197,8 @@ public sealed class DashboardHistory
 
     /// <summary>
     /// Buckets of [from, to) at <paramref name="resolution"/> seconds, clamped to retention. Resolutions of a minute or more
-    /// read closed minutes when the range starts before the per-second data, and per-second data after the last closed minute.
+    /// read closed minutes that lie wholly inside the range when it starts before the per-second data, and per-second data for
+    /// every second no used minute covers: after the last closed minute, and in minutes the range cuts at either end.
     /// </summary>
     public HistoryResponse Query(DateTimeOffset now, DateTimeOffset from, DateTimeOffset to, int resolution)
     {
@@ -213,20 +216,21 @@ public sealed class DashboardHistory
                 buckets[end] = bucket = new();
             return bucket;
         }
-        var minuteEnd = DateTimeOffset.MinValue;
+        // A minute the range cuts would count seconds outside it; only whole minutes are used, and their seconds are skipped below.
+        var usedMinutes = new HashSet<DateTimeOffset>();
         if (useMinutes)
             foreach (var minute in minutes)
             {
-                minuteEnd = minute.At;
-                if (minute.At <= from || minute.At > to)
+                if (minute.At.AddMinutes(-1) < from || minute.At > to)
                     continue;
+                usedMinutes.Add(minute.At);
                 Bucket(minute.At).Add(minute.Seconds, minute.Routes, minute.States);
             }
         var states = new Dictionary<string, CompactState>(baseline, StringComparer.OrdinalIgnoreCase);
         foreach (var second in seconds)
         {
             Apply(states, second.Changes);
-            if (second.At > from && second.At <= to && second.At > minuteEnd)
+            if (second.At > from && second.At <= to && !usedMinutes.Contains(Ceiling(second.At, 60)))
                 Bucket(second.At).Add(1, second.Routes, states.Values);
         }
         bool InRange(Stored item) => item.ReceivedAt >= from && item.ReceivedAt < to;

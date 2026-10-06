@@ -58,7 +58,7 @@ The same record shape as `/admin/requests`. No bodies, keys or tokens.
   - Per-second route counts and merged states for 1 hour. States are stored change-only, with a baseline for the oldest retained second.
   - Per-minute aggregates for 24 hours: route counts summed, worst state, non-healthy seconds, accountOpen/halfOpen and the largest p95 per deployment.
   - Request events for 1 hour: every notable one (status >= 400 or more than one attempt) and a uniform sample of at most 4 others per second of receipt time. Hard cap 20 000 and an estimated 32 MiB; over it, the oldest others leave first, then the oldest notable ones. At 40 requests/s with 2 % notable, the hour holds about 17 300 events.
-  - The live snapshot keeps its own unthinned 2-minute request queue (same caps).
+  - The live snapshot keeps its own unthinned 2-minute request queue, capped at 12 000 events (the 100 browser samples a second over two minutes) and an estimated 32 MiB.
   - The latest record of each deployment seen in the last 24 hours (at most 5 000), so a removed deployment still renders.
   - Route shapes (caller, model, pool, zone, status, attempt chain) and their strings are interned. Ingest rejects identifiers over 512 characters, so no ID is ever cut (an ARM deployment ID is about 170). A tick stores (shape, count) pairs. Beyond 10 000 live shapes, a new shape counts under caller `(other)` with its status and attempt count.
   - Hard caps, each dropping the oldest data first: 3 600 seconds, 200 000 per-second route entries, 100 000 state changes; 1 440 minutes, 400 000 per-minute route entries, 100 000 per-minute states.

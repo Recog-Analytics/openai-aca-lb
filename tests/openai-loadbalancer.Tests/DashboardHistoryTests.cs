@@ -122,7 +122,7 @@ public class DashboardHistoryTests
         Assert.Equal(DashboardHistory.MaxRequests, requests.RequestCount);
         Assert.Equal("5", requests.Retained()[0].Id);
         Assert.Equal(DashboardHistory.MaxRequests, requests.NotableRequestCount);
-        Assert.Equal(DashboardHistory.MaxRequests, requests.Requests(at.AddSeconds(100), TimeSpan.FromMinutes(1)).Count);
+        Assert.Equal(DashboardHistory.MaxRecentRequests, requests.Requests(at.AddSeconds(100), TimeSpan.FromMinutes(1)).Count);
         var large = new DashboardHistory();
         for (var index = 0; index < 3000; index++)
             large.Add(at, Request(index.ToString()) with { Status = 500, RequestedModel = new string('m', 10_000) });
@@ -229,6 +229,24 @@ public class DashboardHistoryTests
         var fine = store.History(start, clock.GetUtcNow(), 10);
         Assert.Equal(clock.GetUtcNow().AddHours(-1), fine.From);
         Assert.Equal(360, fine.Buckets.Count);
+    }
+
+    [Fact]
+    public void MinuteBucketsNeverCountSecondsOutsideTheRange()
+    {
+        var clock = new TestClock();
+        var store = new DashboardStore(clock);
+        var start = clock.GetUtcNow();
+        // One request a second for two hours; the clock starts on a minute boundary.
+        Run(clock, store, 7200);
+        long Total(HistoryResponse response) => response.Buckets.Sum(bucket => bucket.Routes.Sum(route => route.Count));
+        // From mid-minute, older than the per-second hour: the cut first minute is left out, not counted whole.
+        var old = store.History(start.AddSeconds(630), start.AddSeconds(1800), 60);
+        Assert.Equal(1800 - 660, Total(old));
+        Assert.Equal(1800 - 660, old.Buckets.Sum(bucket => bucket.Seconds));
+        // To mid-minute, inside the per-second hour: the cut last minute comes from per-second data, not dropped.
+        var recent = store.History(start.AddSeconds(630), start.AddSeconds(6630), 60);
+        Assert.Equal(6630 - 660, Total(recent));
     }
 
     [Fact]

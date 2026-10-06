@@ -118,6 +118,14 @@ public class DashboardStoreTests
         clock.Advance(TimeSpan.FromSeconds(1));
         Assert.Empty(store.Tick().Requests);
         Assert.Empty(store.Snapshot().Counts);
+        // The snapshot keeps what a browser keeps from deltas: 100 samples a second over two minutes, newest first in.
+        for (var batch = 0; batch < 60; batch++)
+            store.Ingest(Batch(clock, "0", "Healthy") with { Requests = Enumerable.Range(1000 + batch * 200, 200).Select(value => Request(value.ToString())).ToArray() });
+        var snapshot = store.Snapshot().Requests;
+        Assert.Equal(DashboardHistory.MaxRecentRequests, snapshot.Count);
+        Assert.Equal(12_000, DashboardHistory.MaxRecentRequests);
+        Assert.Equal("12999", snapshot[^1].Id);
+        Assert.DoesNotContain(snapshot, item => item.Id == "0");
     }
 
     [Fact]

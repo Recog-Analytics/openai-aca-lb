@@ -21,6 +21,8 @@ public sealed record DashboardFrame(DateTimeOffset At, IReadOnlyList<string> Rep
 
 public sealed class DashboardStore(TimeProvider clock)
 {
+    /// <summary>Request events each delta samples for browsers, across all replicas.</summary>
+    public const int BrowserSamplesPerSecond = 100;
     private readonly Lock gate = new();
     private static readonly TimeSpan Recent = TimeSpan.FromMinutes(2);
     private readonly Dictionary<string, ReplicaState> replicas = new(StringComparer.Ordinal);
@@ -53,12 +55,12 @@ public sealed class DashboardStore(TimeProvider clock)
                 history.Add(now, request);
                 // Reservoir sampling bounds pending events across all replicas between ticks.
                 pendingSeen++;
-                if (pending.Count < 100)
+                if (pending.Count < BrowserSamplesPerSecond)
                     pending.Add(request);
                 else
                 {
                     var index = Random.Shared.NextInt64(pendingSeen);
-                    if (index < 100)
+                    if (index < BrowserSamplesPerSecond)
                         pending[(int)index] = request;
                 }
             }

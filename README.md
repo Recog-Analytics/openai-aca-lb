@@ -558,7 +558,7 @@ The service keeps history in memory. A restart loses it; one replica holds all o
 | Merged deployment state per second, stored on change | 1 hour | 100,000 changes |
 | Per-minute route counts and worst state per deployment | 24 hours | 1,440 minutes, 400,000 route entries, 100,000 states |
 | Sampled request events: every failure or retry, at most 4 others per second | 1 hour | 20,000 events and an estimated 32 MiB; others leave before failures and retries |
-| Request events for the live snapshot, unthinned | 2 minutes | 20,000 events and an estimated 32 MiB |
+| Request events for the live snapshot, unthinned | 2 minutes | 12,000 events (100 browser samples a second over two minutes) and an estimated 32 MiB |
 | Latest record of each deployment seen | 24 hours | 5,000 deployments |
 | Interned route shapes | while referenced | 10,000; further new shapes count under caller `(other)` |
 
