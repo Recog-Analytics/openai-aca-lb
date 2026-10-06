@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 set -eu
 umask 077
@@ -18,9 +18,10 @@ deploy_image() {
   shift 3
   echo "Building ${image}:latest..."
   az acr build --subscription "${AZURE_SUBSCRIPTION_ID}" --registry "${AZURE_REGISTRY_NAME}" --image "${image}:latest" "$@" --output none
-  query=$(cat "${script_dir}/update-image.jmespath")
-  query=${query/__IMAGE__/${AZURE_REGISTRY_NAME}.azurecr.io/${image}:latest}
-  query=${query/__READINESS_PATH__/$readiness}
+  # azure.yaml runs this hook with POSIX sh, so the placeholders are replaced with sed, not ${var/pattern/replacement}.
+  # The registry name is checked above and the image names and paths are literals, so no value carries a sed delimiter.
+  query=$(sed -e "s|__IMAGE__|${AZURE_REGISTRY_NAME}.azurecr.io/${image}:latest|" -e "s|__READINESS_PATH__|${readiness}|" \
+    "${script_dir}/update-image.jmespath")
   az containerapp show --subscription "${AZURE_SUBSCRIPTION_ID}" --name "$app" --resource-group "${RESOURCE_GROUP_NAME}" --query "$query" --output json > "$update_file"
   az containerapp update --subscription "${AZURE_SUBSCRIPTION_ID}" --name "$app" --resource-group "${RESOURCE_GROUP_NAME}" --yaml "$update_file" --output none
 }

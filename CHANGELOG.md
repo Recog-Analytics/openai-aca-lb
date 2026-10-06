@@ -54,6 +54,7 @@
 
 ### Fixed
 
+- Run the post-provision hook under POSIX `sh`, as `azure.yaml` declares: replace the bash-only placeholder substitution with `sed`.
 - Count only authenticated requests in the retry budget, so rejected caller keys cannot increase permitted retries.
 
 ### Breaking changes
