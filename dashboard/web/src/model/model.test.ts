@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { PlaybackClock } from "./clock";
 import { DemoStream, scenarios } from "./demo";
-import { findIssues, percent, verdict } from "./attention";
+import { count, findIssues, percent, rate, verdict } from "./attention";
 import { computeFunnel, preferredTier, quotaShare, splitPaths } from "./funnel";
 import { RunGrouper } from "./runs";
 import { niceCeiling } from "../ui/Scrubber";
@@ -293,6 +293,12 @@ describe("attention", () => {
   test("percent keeps small shares honest", () => {
     expect([percent(0), percent(0.0004), percent(0.012), percent(0.5), percent(0.9975), percent(0.9996), percent(1)])
       .toEqual(["0\u202f%", "<\u202f0.1\u202f%", "1.2\u202f%", "50\u202f%", "99.7\u202f%", ">\u202f99.9\u202f%", "100\u202f%"]);
+  });
+
+  test("a low rate switches unit instead of rounding to zero", () => {
+    // 8 requests in 15 minutes once read "0.0 req/s".
+    expect([rate(0), rate(8 / 900), rate(0.0005), rate(0.25), rate(1), rate(42.4)]).toEqual(["0/s", "0.5/min", "1.8/h", "0.3/s", "1/s", "42/s"]);
+    expect([count(8), count(940), count(1234), count(3_400_000)]).toEqual(["8", "940", "1.2K", "3.4M"]);
   });
 });
 

@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from "motion/react";
 import recogMark from "../assets/recog-mark.svg?url";
 import type { Connection } from "../data/source";
-import { percent, type Verdict } from "../model/attention";
+import { count, percent, rate, type Verdict } from "../model/attention";
 import { scenarioLabels } from "../model/demo";
 import type { Funnel } from "../model/funnel";
 import { ranges, spanLabel, type RangeKey } from "../model/history";
@@ -59,7 +59,6 @@ export function TopBar(props: Props) {
     : connection.kind === "connecting" ? "Connecting to the stream"
     : connection.failures > 3 ? "Stream unavailable. Reload the page to sign in again." : "Reconnecting";
   const share = (f: Funnel | null, pick: (f: Funnel) => number) => (f && f.total > 0 ? pick(f) / f.total : null);
-  const rate = (f: Funnel | null) => (f && f.seconds > 0 ? f.total / f.seconds : null);
   const lost = (f: Funnel) => f.failed + f.refused;
   const spilled = (f: Funnel) => [...f.tiers.values()].reduce((sum, tier) => sum + tier.spilled, 0);
   return (
@@ -127,12 +126,16 @@ export function TopBar(props: Props) {
         </div>
         <div className="kpi-block">
           <dl className="kpis" aria-describedby="kpi-caption">
-            <Kpi label="Served" value={share(funnel, (f) => f.served)} before={share(previous, (f) => f.served)} format={percent} unit="share" good="up" />
-            <Kpi label="Failed or refused" value={share(funnel, lost)} before={share(previous, lost)} format={percent} unit="share" good="down"
-              alert={funnel.total > 0 && lost(funnel) / funnel.total >= 0.005} />
-            <Kpi label="After a retry" value={share(funnel, (f) => f.fellBack)} before={share(previous, (f) => f.fellBack)} format={percent} unit="share" good="down" />
-            <Kpi label="Spilled to a lower tier" value={share(funnel, spilled)} before={share(previous, spilled)} format={percent} unit="share" good="down" />
-            <Kpi label="Requests" value={rate(funnel)} before={rate(previous)} format={(v) => `${v.toFixed(v < 10 ? 1 : 0)}/s`} unit="rate" />
+            <Kpi label="Served" detail={count(funnel.served)} value={share(funnel, (f) => f.served)} before={share(previous, (f) => f.served)}
+              format={percent} unit="share" good="up" />
+            <Kpi label="Failed or refused" detail={count(lost(funnel))} value={share(funnel, lost)} before={share(previous, lost)} format={percent}
+              unit="share" good="down" alert={funnel.total > 0 && lost(funnel) / funnel.total >= 0.005} />
+            <Kpi label="After a retry" detail={count(funnel.fellBack)} value={share(funnel, (f) => f.fellBack)} before={share(previous, (f) => f.fellBack)}
+              format={percent} unit="share" good="down" />
+            <Kpi label="Spilled to a lower tier" detail={count(spilled(funnel))} value={share(funnel, spilled)} before={share(previous, spilled)}
+              format={percent} unit="share" good="down" />
+            <Kpi label="Requests" detail={funnel.seconds > 0 ? rate(funnel.total / funnel.seconds) : null} value={funnel.total}
+              before={previous?.total ?? null} format={count} unit="count" />
           </dl>
           <p id="kpi-caption" className="kpi-caption">
             {viewing ? `${spanLabel(coveredSeconds)} to ${time(viewing.t)}` : `Last ${spanLabel(coveredSeconds)}`}
@@ -144,9 +147,10 @@ export function TopBar(props: Props) {
   );
 }
 
-function Kpi({ label, value, before, format, unit, good, alert }: {
-  label: string; value: number | null; before: number | null; format: (value: number) => string;
-  unit: "rate" | "share"; good?: "up" | "down"; alert?: boolean;
+/** One figure; `detail` follows the label in brackets: the request count behind a share, or the rate behind a count. */
+function Kpi({ label, detail, value, before, format, unit, good, alert }: {
+  label: string; detail: string | null; value: number | null; before: number | null; format: (value: number) => string;
+  unit: "count" | "share"; good?: "up" | "down"; alert?: boolean;
 }) {
   const change = value !== null && before !== null ? value - before : null;
   const significant = change !== null && (unit === "share" ? Math.abs(change) >= 0.01 : before !== null && before > 0 && Math.abs(change) / before >= 0.1);
@@ -154,13 +158,13 @@ function Kpi({ label, value, before, format, unit, good, alert }: {
   const tone = !significant || !good ? "neutral" : direction === good ? "good" : "bad";
   return (
     <div data-alert={alert || undefined}>
-      <dt>{label}</dt>
+      <dt>{label}{detail !== null && <span className="kpi-detail"> ({detail})</span>}</dt>
       <dd>
         <span className="kpi-value">{value === null ? "—" : format(value)}</span>
         <span className="kpi-change" data-tone={tone}>
           {!significant || change === null ? "" : unit === "share"
             ? `${change > 0 ? "+" : "−"}${Math.round(Math.abs(change) * 100) || "<1"} pts`
-            : `${change > 0 ? "+" : "−"}${Math.abs(change).toFixed(1)}/s`}
+            : `${change > 0 ? "+" : "−"}${count(Math.abs(change))}`}
         </span>
       </dd>
     </div>

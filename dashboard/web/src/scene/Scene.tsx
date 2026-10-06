@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { percent } from "../model/attention";
+import { count, percent, rate } from "../model/attention";
 import type { PlaybackClock } from "../model/clock";
 import { quotaShare, type Flow, type Funnel } from "../model/funnel";
 import type { NodeLayout, SceneLayout } from "../model/layout";
@@ -107,7 +107,6 @@ export function Scene(props: Props) {
   const hoveredId = hovered?.startsWith("dep:") ? hovered.slice(4) : null;
   const hoveredItem = hoveredId ? frame?.deployments.get(hoveredId) : undefined;
   const hoveredPosition = hoveredId ? (renderer?.nodePosition(hoveredId) ?? null) : null;
-  const rate = funnel.seconds > 0 ? total / funnel.seconds : 0;
   const tiers = [...new Set(deployments.map((item) => item.deployment.tier))].sort((a, b) => a - b);
   const byView = layout.view === "region";
   // A leaf is named by what its group does not say: the model under a region, the region under a model.
@@ -123,9 +122,9 @@ export function Scene(props: Props) {
           </div>
         ))}
 
-        {/* The LB's column: its rate, then the split by tier, which answers "is the quota split what we want?". */}
+        {/* The LB's column: its requests and rate, then the split by tier, which answers "is the quota split what we want?". */}
         <div className="lb-head" data-column="lb" ref={bind("column:lb")}>
-          <span>Load balancer <strong>{rate.toFixed(rate < 10 ? 1 : 0)}</strong> req/s</span>
+          <span>Load balancer <strong>{count(total)}</strong> {total === 1 ? "request" : "requests"}, {rate(funnel.seconds > 0 ? total / funnel.seconds : 0)}</span>
           <span className="lb-caption" id="lb-tiers-caption">Served by tier</span>
           <div className="lb-tiers" role="list" aria-labelledby="lb-tiers-caption">
             {tiers.map((tier) => {
@@ -136,6 +135,7 @@ export function Scene(props: Props) {
                 <div key={tier} className="lb-tier" role="listitem" data-zero={served === 0 || undefined} {...hover(`tier:${tier}`)}>
                   <span>{tierName(tier)}</span>
                   <strong>{percent(served)}</strong>
+                  <span className="flow-count">{count(flow?.served ?? 0)}</span>
                   <span data-tone="spill">{spilled >= 0.005 ? `${percent(spilled)} spilled in` : ""}</span>
                 </div>
               );
@@ -147,8 +147,8 @@ export function Scene(props: Props) {
           const flow = funnel.callers.get(caller.id);
           return (
             <div key={caller.id} className="flow-label" data-align="end" ref={bind(`caller:${caller.id}`)}>
-              <span className="flow-name">{caller.id}</span>
-              <Figures share={share(flow?.reached ?? 0)} delta={delta((f) => f.callers.get(caller.id)?.reached ?? 0)}
+              <span className="flow-name" title={caller.id}>{caller.id}</span>
+              <Figures requests={flow?.reached ?? 0} share={share(flow?.reached ?? 0)} delta={delta((f) => f.callers.get(caller.id)?.reached ?? 0)}
                 note={flow && flow.failed > 0 && (flow.failed / flow.reached >= 0.01) ? <span data-tone="failed">{percent(share(flow.failed))} failed</span> : null} />
             </div>
           );
@@ -160,7 +160,7 @@ export function Scene(props: Props) {
             <div key={place.key} className="place" data-compact={place.compact || undefined} data-inline={place.inline || undefined} ref={bind(`place:${place.key}`)}
               {...hover(`place:${place.key}`)} title={place.key === "global" ? "Global deployments may process requests in any Azure region" : undefined}>
               <span className="flow-name">{place.label}</span>
-              <Figures share={share(flow?.served ?? 0)} delta={delta((f) => f.places.get(place.key)?.served ?? 0)}
+              <Figures requests={flow?.served ?? 0} share={share(flow?.served ?? 0)} delta={delta((f) => f.places.get(place.key)?.served ?? 0)}
                 note={place.compact ? null : <FlowNote flow={flow} share={share} />} />
             </div>
           );
@@ -169,22 +169,22 @@ export function Scene(props: Props) {
         <div className="place" data-kind="refused" data-hidden={funnel.refused === 0 || undefined} ref={bind("refused")} aria-hidden={funnel.refused === 0}
           {...hover("refused")}>
           <span className="flow-name">Refused by the LB</span>
-          <Figures share={share(funnel.refused)} delta={delta((f) => f.refused)} note={<span>no deployment available</span>} />
+          <Figures requests={funnel.refused} share={share(funnel.refused)} delta={delta((f) => f.refused)} note={<span>no deployment available</span>} />
         </div>
 
         {layout.nodes.map((node) => {
           if (node.kind === "idle") {
             const group = groupOf.get(node.place);
-            return <IdleLane key={node.id} node={node} count={group?.idle ?? node.members.length} expanded={group?.expanded ?? false}
-              served={node.members.reduce((sum, id) => sum + (funnel.deployments.get(id)?.served ?? 0), 0) / (total || 1)}
+            return <IdleLane key={node.id} node={node} members={group?.idle ?? node.members.length} expanded={group?.expanded ?? false}
+              served={node.members.reduce((sum, id) => sum + (funnel.deployments.get(id)?.served ?? 0), 0)} total={total}
               groupLabel={group?.label ?? node.place} bind={bind} hover={hover} onToggle={() => onToggleGroup(node.place)} />;
           }
           if (node.kind === "fold") {
             const lead = worstMember(node.members, frame, t);
             const item = lead?.item;
             const visual = lead?.visual ?? nodeVisual(undefined, undefined, t);
-            const served = node.members.reduce((sum, id) => sum + (funnel.deployments.get(id)?.served ?? 0), 0) / (total || 1);
-            return <FoldLane key={node.id} node={node} look={visual.look} status={statusText(visual, item)} served={served}
+            const served = node.members.reduce((sum, id) => sum + (funnel.deployments.get(id)?.served ?? 0), 0);
+            return <FoldLane key={node.id} node={node} look={visual.look} status={statusText(visual, item)} served={served} total={total}
               groupLabel={groupOf.get(node.place)?.label ?? node.place} bind={bind} hover={hover} onToggle={() => onToggleGroup(node.place)} />;
           }
           const deployment = byId.get(node.id);
@@ -203,7 +203,7 @@ export function Scene(props: Props) {
                 onFocus={() => setHovered(`dep:${node.id}`)} onBlur={() => setHovered(null)} />
               <div className="flow-label" data-kind="deployment">
                 <span className="flow-name">{name} <span className="flow-weight">{weightLabel(deployment.weight, deployment.tier)}</span></span>
-                <Figures share={share(flow?.served ?? 0)} delta={delta((f) => f.deployments.get(node.id)?.served ?? 0)}
+                <Figures requests={flow?.served ?? 0} share={share(flow?.served ?? 0)} delta={delta((f) => f.deployments.get(node.id)?.served ?? 0)}
                   inline={status ? <StatusNote look={visual.look} text={status} /> : <WeightNote quota={quota} served={share(flow?.served ?? 0)} />}
                   note={<FlowNote flow={flow} share={share} spill={false} />} />
               </div>
@@ -235,8 +235,8 @@ export function Scene(props: Props) {
  * The lane that stands for a group's idle deployments: "14 idle", with the little traffic they took. A click lists them;
  * expanded, the same lane folds them back.
  */
-function IdleLane({ node, count, expanded, served, groupLabel, bind, hover, onToggle }: {
-  node: NodeLayout; count: number; expanded: boolean; served: number; groupLabel: string;
+function IdleLane({ node, members, expanded, served, total, groupLabel, bind, hover, onToggle }: {
+  node: NodeLayout; members: number; expanded: boolean; served: number; total: number; groupLabel: string;
   bind: (key: string) => (element: HTMLElement | null) => void; hover: (key: string) => Record<string, unknown>; onToggle: () => void;
 }) {
   // Idle when they took nothing; quiet when they took a little (under half a percent each), with that little shown.
@@ -244,10 +244,10 @@ function IdleLane({ node, count, expanded, served, groupLabel, bind, hover, onTo
   return (
     <div className="deployment" data-kind="idle" data-density="one" ref={bind(`dep:${node.id}`)} {...hover(`dep:${node.id}`)}>
       <button type="button" className="idle-toggle" aria-expanded={expanded} onClick={onToggle}
-        aria-label={`${expanded ? "Hide" : "Show"} ${count} ${word} ${count === 1 ? "deployment" : "deployments"} in ${groupLabel}`}
+        aria-label={`${expanded ? "Hide" : "Show"} ${members} ${word} ${members === 1 ? "deployment" : "deployments"} in ${groupLabel}`}
         title="Healthy deployments that took under 0.5 % of requests">
-        <span className="idle-count">{expanded ? `Hide ${count} ${word}` : `${count} ${word}`}</span>
-        {!expanded && served > 0 && <span className="idle-share">{percent(served)}</span>}
+        <span className="idle-count">{expanded ? `Hide ${members} ${word}` : `${members} ${word}`}</span>
+        {!expanded && served > 0 && <span className="idle-share">{percent(served / total)} <span className="flow-count">{count(served)}</span></span>}
         <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true" data-open={expanded || undefined}><path d="M3 4.5l3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
       </button>
     </div>
@@ -260,20 +260,22 @@ const foldWords: Partial<Record<NodeLook, string>> = { open: "down", halfOpen: "
  * The lane of many deployments in one group with the same problem: "21 down, Open, probe in 81 s". It is red (or the
  * problem's colour) and never needs expanding to be seen; a click lists the deployments.
  */
-function FoldLane({ node, look, status, served, groupLabel, bind, hover, onToggle }: {
-  node: NodeLayout; look: NodeLook; status: string | null; served: number; groupLabel: string;
+function FoldLane({ node, look, status, served, total, groupLabel, bind, hover, onToggle }: {
+  node: NodeLayout; look: NodeLook; status: string | null; served: number; total: number; groupLabel: string;
   bind: (key: string) => (element: HTMLElement | null) => void; hover: (key: string) => Record<string, unknown>; onToggle: () => void;
 }) {
-  const count = node.members.length;
+  const members = node.members.length;
+  const share = total > 0 ? served / total : 0;
   return (
     <div className="deployment" data-kind="fold" data-look={look} data-density={node.density} ref={bind(`dep:${node.id}`)} {...hover(`dep:${node.id}`)}>
       <div className="flow-label" data-kind="deployment">
-        <button type="button" className="fold-toggle" onClick={onToggle} aria-label={`Show the ${count} ${foldWords[look] ?? "affected"} deployments in ${groupLabel}`}>
-          <span className="flow-name">{count} deployments {foldWords[look] ?? "affected"}</span>
+        <button type="button" className="fold-toggle" onClick={onToggle} aria-label={`Show the ${members} ${foldWords[look] ?? "affected"} deployments in ${groupLabel}`}>
+          <span className="flow-name">{members} deployments {foldWords[look] ?? "affected"}</span>
           <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><path d="M3 4.5l3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
         </button>
         <span className="flow-figures">
-          <span className="flow-share" data-zero={served === 0 || undefined} style={{ ["--s" as string]: Math.sqrt(served).toFixed(3) }}>{percent(served)}</span>
+          <span className="flow-share" data-zero={served === 0 || undefined} style={{ ["--s" as string]: Math.sqrt(share).toFixed(3) }}>{percent(share)}</span>
+          <span className="flow-count">{count(served)}</span>
           {status && <span className="flow-inline"><StatusNote look={look} text={status} /></span>}
         </span>
       </div>
@@ -281,13 +283,14 @@ function FoldLane({ node, look, status, served, groupLabel, bind, hover, onToggl
   );
 }
 
-/** The node's share in large type, with its change against a minute ago and one line of context. */
-function Figures({ share, delta, inline, note }: { share: number; delta: number | null; inline?: ReactNode; note: ReactNode }) {
+/** The node's share in large type, its request count, its change against a minute ago and one line of context. */
+function Figures({ requests, share, delta, inline, note }: { requests: number; share: number; delta: number | null; inline?: ReactNode; note: ReactNode }) {
   // Big shares read first: the figure grows with the square root of its share, and a zero share recedes.
   return (
     <>
       <span className="flow-figures">
         <span className="flow-share" data-zero={share === 0 || undefined} style={{ ["--s" as string]: Math.sqrt(share).toFixed(3) }}>{percent(share)}</span>
+        <span className="flow-count">{count(requests)}</span>
         {delta !== null && (
           <span className="flow-delta" data-direction={delta > 0 ? "up" : "down"} title="Change in share against the same window a minute earlier">
             {delta > 0 ? "+" : "−"}{Math.round(Math.abs(delta))} pts

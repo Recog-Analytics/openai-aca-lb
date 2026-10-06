@@ -1,5 +1,5 @@
 import { useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
-import { percent } from "../model/attention";
+import { count, percent, rate as formatRate } from "../model/attention";
 import type { PlaybackClock, PlaybackMode } from "../model/clock";
 import { rangeKeys, ranges, type RangeKey } from "../model/history";
 import type { Bin } from "../model/strip";
@@ -152,7 +152,7 @@ export function Scrubber({ clock, bins, from, to, t, mode, range, onRange, windo
             <div className="readout" aria-hidden="true" data-side={pointed > bins.length / 2 ? "left" : "right"}
               style={{ left: `${((pointed + 0.5) / bins.length) * 100}%` }}>
               <strong>{range === "2m" ? agoLabel(Math.max(0, Math.round((to - pointedBin.end) / 1000))) : `${clockTime(pointedBin.start)}–${clockTime(pointedBin.end)}`}</strong>
-              {pointedBin.seconds === 0 ? <span>No data retained</span> : <span>{rate(pointedBin).toFixed(1)} req/s</span>}
+              {pointedBin.seconds === 0 ? <span>No data retained</span> : <span>{count(pointedTotal)} requests, {formatRate(rate(pointedBin))}</span>}
               {pointedBin.retried > 0 && <span data-kind="retried">{percent(pointedBin.retried / pointedTotal)} after a retry</span>}
               {pointedBin.failed > 0 && <span data-kind="failed">{percent(pointedBin.failed / pointedTotal)} failed or refused</span>}
               {pointedBin.worst && <span data-kind="problem">{pointedBin.unhealthy === 1 ? "1 deployment" : `${pointedBin.unhealthy} deployments`} {stateWords[pointedBin.worst] ?? "unhealthy"}</span>}
