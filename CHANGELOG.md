@@ -56,6 +56,7 @@
 
 - Skip a malformed ARM deployment (no valid name, model, version, or capacity) with a warning instead of failing the whole discovery refresh.
 - Run the post-provision hook under POSIX `sh`, as `azure.yaml` declares: replace the bash-only placeholder substitution with `sed`.
+- Keep each deployment's TTFB samples sorted, so health reads the p95 by index instead of sorting the five-minute window on every snapshot and attempt.
 - Count only authenticated requests in the retry budget, so rejected caller keys cannot increase permitted retries.
 
 ### Breaking changes

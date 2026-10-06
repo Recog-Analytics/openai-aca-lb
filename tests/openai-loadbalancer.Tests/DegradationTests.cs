@@ -50,6 +50,28 @@ public class DegradationTests
     }
 
     [Fact]
+    public void IncrementalP95MatchesASortedReferenceAsSamplesArriveAndExpire()
+    {
+        var fixture = new HealthStateTests.Fixture();
+        var random = new Random(7);
+        var window = new Queue<(DateTimeOffset At, double Seconds)>();
+        for (var index = 0; index < 600; index++)
+        {
+            var seconds = Math.Round(random.NextDouble() * 5, 2);
+            var now = fixture.Clock.GetUtcNow();
+            using (var attempt = fixture.Acquire("a")!)
+                attempt.RecordTtfb(TimeSpan.FromSeconds(seconds));
+            window.Enqueue((now, seconds));
+            fixture.Clock.Advance(TimeSpan.FromSeconds(1.5));
+            while (window.Peek().At <= fixture.Clock.GetUtcNow() - TimeSpan.FromMinutes(5))
+                window.Dequeue();
+            var sorted = window.Select(item => item.Seconds).Order().ToArray();
+            TimeSpan? expected = sorted.Length < 20 ? null : TimeSpan.FromSeconds(sorted[(int)Math.Ceiling(sorted.Length * 0.95) - 1]);
+            Assert.Equal(expected, fixture.Snapshot("a").P95);
+        }
+    }
+
+    [Fact]
     public void UsesNearestRankP95RatherThanMaximumOrTotalDuration()
     {
         var fixture = new HealthStateTests.Fixture();

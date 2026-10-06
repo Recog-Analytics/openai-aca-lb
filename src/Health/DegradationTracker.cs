@@ -3,19 +3,29 @@ namespace openai_loadbalancer.Health;
 internal sealed class DegradationTracker
 {
     private readonly Queue<(DateTimeOffset At, TimeSpan Ttfb)> samples = new();
+    // The same samples kept in order, so the nearest-rank p95 is one index: health reads it on every snapshot and attempt,
+    // under the health lock. Insert and expiry are a binary search and one move, instead of a full sort per read.
+    private readonly List<long> sorted = [];
     private DateTimeOffset? recoveringSince;
     public bool IsDegraded { get; private set; }
 
-    public void Record(DateTimeOffset now, TimeSpan ttfb) => samples.Enqueue((now, ttfb));
+    public void Record(DateTimeOffset now, TimeSpan ttfb)
+    {
+        samples.Enqueue((now, ttfb));
+        var index = sorted.BinarySearch(ttfb.Ticks);
+        sorted.Insert(index < 0 ? ~index : index, ttfb.Ticks);
+    }
 
     public TimeSpan? GetP95(DateTimeOffset now)
     {
         while (samples.TryPeek(out var sample) && sample.At <= now - TimeSpan.FromMinutes(5))
+        {
             samples.Dequeue();
-        if (samples.Count < 20)
+            sorted.RemoveAt(sorted.BinarySearch(sample.Ttfb.Ticks));
+        }
+        if (sorted.Count < 20)
             return null;
-        var sorted = samples.Select(sample => sample.Ttfb).Order().ToArray();
-        return sorted[(int)Math.Ceiling(sorted.Length * 0.95) - 1];
+        return TimeSpan.FromTicks(sorted[(int)Math.Ceiling(sorted.Count * 0.95) - 1]);
     }
 
     public void Evaluate(DateTimeOffset now, TimeSpan? p95, double? peerMedianSeconds, double floorSeconds, double? thresholdSeconds)
