@@ -1,0 +1,4 @@
+callers:
+  - name: devkit
+    zones: [global, eu, us]
+    keyHashes: ["sha256:1f77a02b67ef2eaead230e6b2700931472be9513bd98f898d9dd825542aac47d"]

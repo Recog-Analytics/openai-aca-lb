@@ -1,0 +1,6 @@
+defaultVersions:
+  gpt-4o: "2024-11-20"
+  text-embedding-3-large: "1"
+aliases:
+  # Legacy deployment name → model key. Deployment names such as gpt4o also resolve as pools without an alias.
+  chat: gpt-4o@2024-11-20

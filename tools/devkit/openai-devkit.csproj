@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>openai_loadbalancer.Devkit</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Content Include="config/*.yaml" CopyToOutputDirectory="PreserveNewest" />
+    <Content Update="wwwroot/index.html" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="YamlDotNet" Version="18.1.0" />
+  </ItemGroup>
+</Project>

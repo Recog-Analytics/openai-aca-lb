@@ -62,6 +62,15 @@ param revisionMode string = 'Single'
 @description('The secrets required for the container')
 param secrets array = []
 
+@description('Volumes available to the container.')
+param volumes array = []
+
+@description('Volume mounts for the container.')
+param volumeMounts array = []
+
+@description('Health probes for the container.')
+param probes array = []
+
 @description('The service binds associated with the container')
 param serviceBinds array = []
 
@@ -85,7 +94,7 @@ module containerRegistryAccess '../security/registry-access.bicep' = if (usePriv
   name: '${deployment().name}-registry-access'
   params: {
     containerRegistryName: containerRegistryName
-    principalId: usePrivateRegistry ? userIdentity.properties.principalId : ''
+    principalId: usePrivateRegistry ? userIdentity!.properties.principalId : ''
   }
 }
 
@@ -131,11 +140,14 @@ resource app 'Microsoft.App/containerApps@2023-04-01-preview' = {
     }
     template: {
       serviceBinds: !empty(serviceBinds) ? serviceBinds : null
+      volumes: volumes
       containers: [
         {
           image: !empty(imageName) ? imageName : 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
           name: containerName
           env: env
+          volumeMounts: volumeMounts
+          probes: probes
           resources: {
             cpu: json(containerCpuCoreCount)
             memory: containerMemory
@@ -155,7 +167,7 @@ resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2023-04-01-
 }
 
 output defaultDomain string = containerAppsEnvironment.properties.defaultDomain
-output identityPrincipalId string = normalizedIdentityType == 'None' ? '' : (empty(identityName) ? app.identity.principalId : userIdentity.properties.principalId)
+output identityPrincipalId string = normalizedIdentityType == 'None' ? '' : (empty(identityName) ? app.identity.principalId : userIdentity!.properties.principalId)
 output imageName string = imageName
 output name string = app.name
 output serviceBind object = !empty(serviceType) ? { serviceId: app.id, name: name } : {}

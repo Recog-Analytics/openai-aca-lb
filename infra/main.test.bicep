@@ -13,5 +13,13 @@ module main 'main.bicep' = {
   params: {
     name: environmentName
     location: location
+    keyVaultResourceId: '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/config-rg/providers/Microsoft.KeyVault/vaults/config-vault'
+    // Equivalent scopes must receive one assignment, regardless of case or trailing separators.
+    discoveryScopes: [
+      '  AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA  '
+      '/SUBSCRIPTIONS/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/'
+      '/subscriptions/AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA/resourceGroups/Config-RG///'
+      '/Subscriptions/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/RESOURCEGROUPS/config-rg/'
+    ]
   }
 }

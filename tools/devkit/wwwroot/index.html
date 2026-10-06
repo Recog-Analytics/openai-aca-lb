@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Local devkit · Load balancer</title>
+  <script>
+    try {
+      const preference = localStorage.getItem('devkit-theme');
+      if (preference === 'light' || preference === 'dark') document.documentElement.dataset.theme = preference;
+    } catch {}
+  </script>
+  <style>
+    :root{color-scheme:light dark;--bg:#f4f6f9;--surface:#fff;--soft:#f8fafc;--ink:#172337;--muted:#58677b;--line:#dde4ed;--blue:#225bc7;--blue-soft:#edf3ff;--green:#167247;--green-soft:#eaf6ef;--red:#b33a38;--red-soft:#fff0ef;--radius:14px;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-size:14px;line-height:1.5}button,input,select{font:inherit}button,input,select{min-height:38px;border:1px solid var(--line);border-radius:7px;background:var(--surface);color:var(--ink)}input,select{padding:7px 9px;max-width:100%;width:100%}button{cursor:pointer;padding:8px 14px;font-weight:600}button:hover{background:var(--soft);border-color:var(--muted)}button:disabled{opacity:.6;cursor:wait}.primary{background:var(--blue);color:#fff;border-color:var(--blue)}.primary:hover{background:var(--blue);filter:brightness(.94)}:focus-visible{outline:3px solid var(--blue);outline-offset:3px}a{color:var(--blue)}h1,h2,p{margin:0}h1{font-size:clamp(26px,3vw,34px);line-height:1.2;letter-spacing:-.8px}h2{font-size:19px;letter-spacing:-.3px}.muted{color:var(--muted)}.eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:1.6px;font-weight:700;color:var(--blue);margin-bottom:7px}.shell{max-width:1280px;margin:auto;padding:32px 32px 48px}.top{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:25px}.top p{margin-top:7px}.top-actions{display:flex;flex-direction:column;align-items:flex-end;gap:10px}.dashboard-link{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:8px 14px;border-radius:7px;font-weight:600;text-decoration:none;white-space:nowrap}.badge{display:inline-flex;align-items:center;gap:6px;border-radius:99px;padding:4px 9px;font-size:11px;font-weight:650;white-space:nowrap;background:var(--soft);color:var(--muted)}.badge.good{color:var(--green);background:var(--green-soft)}.badge.bad{color:var(--red);background:var(--red-soft)}.badge.blue{color:var(--blue);background:var(--blue-soft)}.panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:21px}.toolbar{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(280px,1fr);gap:18px}.panel-title{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px}.panel-title h2{font-size:16px}.traffic-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}label{display:block;font-size:11px;font-weight:600;color:var(--muted)}label input,label select{margin-top:5px;color:var(--ink);font-size:13px;font-weight:400}.form-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px}.check{display:flex;align-items:center;gap:8px;color:var(--ink);font-size:13px}.check input{width:16px;height:16px;min-height:0;margin:0;accent-color:var(--blue)}.counters{display:flex;gap:22px;margin-top:16px;padding-top:14px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}.counters strong{color:var(--ink);font-size:15px;font-variant-numeric:tabular-nums;margin-right:5px}.presets{display:flex;flex-wrap:wrap;gap:8px}.presets button{font-size:12px}.presets .recover{color:var(--green)}.help{font-size:12px;color:var(--muted);margin-top:12px}.notice{min-height:21px;margin:12px 2px;color:var(--muted);font-size:12px}.notice.error{color:var(--red)}.section-head{margin:24px 0 14px}.section-head p{font-size:12px;color:var(--muted);margin-top:3px}details{margin-top:12px}summary{cursor:pointer;font-size:12px;font-weight:600;padding:5px 0;color:var(--blue)}.control-form{padding-top:12px}.control-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.control-checks{display:flex;gap:18px;margin-top:14px;flex-wrap:wrap}.control-form .form-footer{justify-content:flex-start;flex-wrap:wrap}.control-form button{font-size:12px;min-height:34px;padding:6px 10px}.accounts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;align-items:start}.account{margin:0;padding:14px 18px}.account>summary{color:var(--ink);font-size:13px}.account-summary,.deployment-summary{display:inline-flex;align-items:center;justify-content:space-between;gap:12px;width:calc(100% - 20px);vertical-align:middle}.account-summary small,.deployment-summary small{font-weight:400;color:var(--muted)}.deployments{margin-top:16px;padding-top:6px;border-top:1px solid var(--line)}.deployments h3{margin:8px 0 0;font-size:12px;color:var(--muted)}.deployment{border-top:1px solid var(--line);padding-top:4px}.deployment:first-of-type{border-top:0}.deployment summary{color:var(--ink)}.empty{padding:28px;text-align:center;color:var(--muted);font-size:13px}.footer{margin-top:22px;color:var(--muted);font-size:11px}
+    .theme-control{display:flex;align-items:center;gap:8px;font-size:11px}.theme-control select{width:auto;min-height:30px;padding:3px 7px;font-size:11px;margin:0}
+    :root[data-theme="light"]{color-scheme:light}
+    :root[data-theme="dark"]{color-scheme:dark;--bg:#101822;--surface:#192331;--soft:#202d3e;--ink:#e9eff7;--muted:#a4b3c6;--line:#344155;--blue:#85afff;--blue-soft:#243957;--green:#85d4a4;--green-soft:#203d32;--red:#ffa39d;--red-soft:#472d32}
+    :root[data-theme="dark"] .primary{background:#3d75dc;border-color:#3d75dc}
+    @media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#101822;--surface:#192331;--soft:#202d3e;--ink:#e9eff7;--muted:#a4b3c6;--line:#344155;--blue:#85afff;--blue-soft:#243957;--green:#85d4a4;--green-soft:#203d32;--red:#ffa39d;--red-soft:#472d32}:root:not([data-theme="light"]) .primary{background:#3d75dc;border-color:#3d75dc}}
+    @media(max-width:1000px){.toolbar{grid-template-columns:1.3fr 1fr}.accounts{grid-template-columns:1fr}}
+    @media(max-width:750px){.shell{padding:22px 16px 30px}.top{align-items:flex-start;flex-direction:column;gap:14px}.top-actions{align-items:flex-start}.toolbar{grid-template-columns:1fr}.traffic-fields{grid-template-columns:repeat(2,minmax(0,1fr))}.panel{padding:17px}.counters{flex-wrap:wrap;gap:14px}}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="top">
+      <div><p class="eyebrow">Local development</p><h1>Load balancer devkit</h1><p class="muted">Simulate Azure and shape traffic. Watch the routing on the dashboard.</p></div>
+      <div class="top-actions"><a class="dashboard-link primary" href="http://localhost:5200" target="_blank" rel="noopener">Open dashboard <span aria-hidden="true">↗</span></a><label class="theme-control">Appearance<select id="theme"><option value="auto">Auto</option><option value="light">Light</option><option value="dark">Dark</option></select></label></div>
+    </header>
+    <div class="toolbar">
+      <section class="panel" aria-labelledby="traffic-title">
+        <div class="panel-title"><h2 id="traffic-title">Traffic generator</h2><span class="badge" id="traffic-status">Stopped</span></div>
+        <form id="traffic-form">
+          <div class="traffic-fields">
+            <label>Requests / second<input name="requestsPerSecond" type="number" min="0.1" max="100" step="0.1" value="3" required></label>
+            <label>Concurrency<input name="concurrency" type="number" min="1" max="100" step="1" value="6" required></label>
+            <label>Model<input name="model" list="models" value="gpt-4o" required maxlength="512"><datalist id="models"></datalist></label>
+            <label>Streaming share (%)<input name="streamingPercent" type="number" min="0" max="100" step="1" value="50" required></label>
+            <label>Zone<select name="zone"><option value="global">Global</option><option value="eu">EU</option><option value="us">US</option></select></label>
+          </div>
+          <div class="form-footer"><label class="check"><input type="checkbox" name="enabled">Send traffic</label><button class="primary" type="submit">Apply traffic</button></div>
+        </form>
+        <p class="counters" aria-label="Generator activity since start"><span><strong id="sent">0</strong>sent</span><span><strong id="completed">0</strong>completed</span><span><strong id="failed">0</strong>failed</span><span><strong id="in-flight">0</strong>in flight</span></p>
+      </section>
+      <section class="panel" aria-labelledby="preset-title">
+        <div class="panel-title"><h2 id="preset-title">Failure scenarios</h2><span class="badge blue">One click</span></div>
+        <div class="presets">
+          <button type="button" data-preset="sweden-slow">Sweden slow</button><button type="button" data-preset="france-throttled">France throttled</button><button type="button" data-preset="eastus2-outage">East US 2 outage</button><button type="button" data-preset="eu-down">EU down</button><button type="button" class="recover" data-preset="recover-all">Recover all</button>
+        </div>
+        <p class="help">Apply a preset, then watch the dashboard. Discovery refreshes every five seconds.</p>
+      </section>
+    </div>
+    <p id="notice" class="notice" role="status" aria-live="polite"></p>
+    <section aria-labelledby="accounts-title"><div class="section-head"><h2 id="accounts-title">Account controls</h2><p>Account defaults apply to every deployment. Deployment overrides take precedence.</p></div><div class="accounts" id="accounts"><div class="panel empty">Loading simulated accounts…</div></div></section>
+    <footer class="footer">Local simulation · controls last until restart</footer>
+  </main>
+  <script>
+    'use strict';
+    const $ = id => document.getElementById(id);
+    $('theme').value = document.documentElement.dataset.theme || 'auto';
+    $('theme').addEventListener('change', event => {
+      const preference = event.target.value;
+      if (preference === 'auto') delete document.documentElement.dataset.theme;
+      else document.documentElement.dataset.theme = preference;
+      try {localStorage.setItem('devkit-theme',preference);} catch {}
+    });
+    const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+    const format = value => (Number.isFinite(Number(value)) ? Number(value) : 0).toLocaleString(undefined, {maximumFractionDigits:1});
+    const controlFields = [
+      ['ttfbMs','TTFB (ms)',0,120000,1],['jitterMs','Jitter (ms)',0,120000,1],
+      ['tokensPerSecond','Tokens / second',1,10000,0.1],['outputTokens','Output tokens',1,4096,1],
+      ['errorRate','Error rate (0–1)',0,1,0.01],['throttleRate','Throttle rate (0–1)',0,1,0.01],
+      ['retryAfterMs','Retry after (ms)',0,120000,1]
+    ];
+    let controls = {accounts:[]}, busy = false;
+    const accountCards = new Map();
+    const trafficForm = $('traffic-form');
+    function notice(message, error = false) {$('notice').textContent = message; $('notice').classList.toggle('error', error);}
+    async function api(path, method = 'GET', body) {
+      const response = await fetch(path, {method, headers:body === undefined ? {} : {'Content-Type':'application/json'}, body:body === undefined ? undefined : JSON.stringify(body), cache:'no-store', signal:AbortSignal.timeout(5000)});
+      if (!response.ok) {
+        let message = `${method} ${path} failed (${response.status})`;
+        try {const result = await response.json(); message = result.error || result.title || message;} catch {}
+        throw new Error(message);
+      }
+      return response.status === 204 ? null : response.json();
+    }
+    function markDirty(form) {form.addEventListener('input', () => {form.dataset.dirty = 'true';});}
+    markDirty(trafficForm);
+    function syncForm(form, values) {
+      if (form.dataset.dirty === 'true' || form.contains(document.activeElement)) return;
+      for (const [key,value] of Object.entries(values)) {
+        const input = form.elements.namedItem(key);
+        if (!input) continue;
+        if (input.type === 'checkbox') input.checked = Boolean(value);
+        else input.value = value ?? '';
+      }
+    }
+    async function mutate(button, action, message) {
+      button.disabled = true;
+      try {await action(); notice(message); await poll();}
+      catch (error) {notice(error.message, true);}
+      finally {button.disabled = false;}
+    }
+    trafficForm.addEventListener('submit', event => {
+      event.preventDefault();
+      const fields = trafficForm.elements;
+      const body = {requestsPerSecond:Number(fields.requestsPerSecond.value), concurrency:Number(fields.concurrency.value), model:fields.model.value.trim(), streamingShare:Number(fields.streamingPercent.value) / 100, zone:fields.zone.value, enabled:fields.enabled.checked};
+      mutate(event.submitter, async () => {await api('/devkit/traffic','PUT',body); trafficForm.dataset.dirty = 'false';}, body.enabled ? 'Traffic settings applied. The generator is running.' : 'Traffic settings applied. The generator is stopped.');
+    });
+    document.querySelectorAll('[data-preset]').forEach(button => button.addEventListener('click', () => mutate(button, () => api(`/devkit/presets/${button.dataset.preset}`,'POST'), `${button.textContent} applied.`)));
+    function controlsForm(account, deployment) {
+      const form = document.createElement('form'); form.className = 'control-form';
+      form.innerHTML = `<div class="control-fields">${controlFields.map(([name,label,min,max,step]) => `<label>${label}<input name="${name}" type="number" min="${min}" max="${max}" step="${step}" required></label>`).join('')}</div><div class="control-checks"><label class="check"><input name="outage" type="checkbox">Connection outage</label><label class="check"><input name="missing" type="checkbox">Deployment missing</label></div>${deployment ? '<p class="help">Outage stops the shared account listener.</p>' : ''}<div class="form-footer"><button class="primary" type="submit">${deployment ? 'Apply override' : 'Apply account controls'}</button>${deployment ? '<button type="button" data-reset>Use account defaults</button>' : ''}</div>`;
+      markDirty(form);
+      form.addEventListener('submit', event => {
+        event.preventDefault(); const settings = {};
+        for (const [key] of controlFields) settings[key] = Number(form.elements.namedItem(key).value);
+        settings.outage = form.elements.outage.checked; settings.missing = form.elements.missing.checked;
+        mutate(event.submitter, async () => {await api('/devkit/controls','PUT',{account, ...(deployment ? {deployment} : {}), controls:settings}); form.dataset.dirty = 'false';}, `Controls applied to ${deployment || account}.`);
+      });
+      form.querySelector('[data-reset]')?.addEventListener('click', event => mutate(event.currentTarget, async () => {await api('/devkit/controls','PUT',{account,deployment,controls:null}); form.dataset.dirty = 'false';}, `${deployment} now uses account defaults.`));
+      return form;
+    }
+    function renderDeployments(card, account) {
+      const list = card.querySelector('[data-deployments]'), current = new Set();
+      for (const deployment of account.deployments) {
+        current.add(deployment.name);
+        let item = list.querySelector(`[data-name="${CSS.escape(deployment.name)}"]`);
+        if (!item) {
+          item = document.createElement('details'); item.className = 'deployment'; item.dataset.name = deployment.name;
+          item.innerHTML = `<summary><span class="deployment-summary"><span>${escape(deployment.name)} <small>· ${escape(deployment.model)} · ${escape(deployment.sku)}</small></span><span class="badge" data-override></span></span></summary>`;
+          item.append(controlsForm(account.name, deployment.name)); list.append(item);
+        }
+        const badge = item.querySelector('[data-override]');
+        badge.textContent = deployment.overrides ? 'Override' : 'Account defaults'; badge.className = `badge ${deployment.overrides ? 'blue' : ''}`;
+        syncForm(item.querySelector('form'), deployment.controls);
+      }
+      for (const item of list.querySelectorAll('[data-name]')) if (!current.has(item.dataset.name)) item.remove();
+    }
+    function renderAccounts() {
+      const current = new Set();
+      for (const account of controls.accounts) {
+        current.add(account.name);
+        let card = accountCards.get(account.name);
+        if (!card) {
+          if (!accountCards.size) $('accounts').replaceChildren();
+          card = document.createElement('details'); card.className = 'panel account';
+          card.innerHTML = `<summary><span class="account-summary"><span>${escape(account.name)} <small>· ${escape(account.region)}</small></span><span class="badge" data-status></span></span></summary>`;
+          const deployments = document.createElement('div'); deployments.className = 'deployments';
+          deployments.innerHTML = '<h3>Deployment overrides</h3><div data-deployments></div>';
+          card.append(controlsForm(account.name), deployments); $('accounts').append(card); accountCards.set(account.name,card);
+        }
+        const outage = account.outage || account.controls.outage;
+        const badge = card.querySelector('[data-status]'); badge.textContent = outage ? 'Outage' : 'Listening'; badge.className = `badge ${outage ? 'bad' : 'good'}`;
+        syncForm(card.querySelector('form'),account.controls);
+        renderDeployments(card, account);
+      }
+      for (const [key,card] of accountCards) if (!current.has(key)) {card.remove(); accountCards.delete(key);}
+      const models = [...new Set(controls.accounts.flatMap(account => account.deployments.map(deployment => deployment.model)))].sort();
+      $('models').innerHTML = models.map(model => `<option value="${escape(model)}"></option>`).join('');
+    }
+    async function poll() {
+      if (busy) return;
+      busy = true;
+      try {
+        const [controlResult, trafficResult] = await Promise.allSettled([api('/devkit/controls'),api('/devkit/traffic')]);
+        if (controlResult.status === 'fulfilled') {controls = controlResult.value; renderAccounts();}
+        else notice(`Devkit controls unavailable: ${controlResult.reason.message}`,true);
+        if (trafficResult.status === 'fulfilled') {
+          const traffic = trafficResult.value;
+          syncForm(trafficForm,{...traffic,streamingPercent:traffic.streamingShare * 100});
+          $('traffic-status').textContent = traffic.enabled ? 'Running' : 'Stopped'; $('traffic-status').className = `badge ${traffic.enabled ? 'good' : ''}`;
+          for (const [id,key] of [['sent','sent'],['completed','completed'],['failed','failed'],['in-flight','inFlight']]) $(id).textContent = format(traffic[key]);
+        }
+      } finally {busy = false;}
+    }
+    poll(); setInterval(poll,1000);
+  </script>
+</body>
+</html>

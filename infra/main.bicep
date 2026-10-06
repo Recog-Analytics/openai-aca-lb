@@ -3,6 +3,27 @@ targetScope = 'subscription'
 @description('Specifies the location for all resources.')
 param location string
 
+@description('Subscription IDs or subscription/resource-group ARM IDs to discover. Empty uses the generated resource group.')
+param discoveryScopes array = []
+
+@description('ARM ID of an existing RBAC-enabled Key Vault containing the configuration files.')
+param keyVaultResourceId string
+
+@description('Key Vault secret containing the callers YAML file.')
+param callersFileSecretName string = 'lb-callers'
+
+@description('Key Vault secret containing the overrides YAML file.')
+param overridesFileSecretName string = 'lb-overrides'
+
+@description('Optional Key Vault secret containing the Slack incoming webhook URL. Empty disables Slack alerts.')
+param slackWebhookSecretName string = ''
+
+@description('Prebuilt proxy image. Empty uses a placeholder until the azd postprovision hook deploys the proxy.')
+param imageName string = ''
+
+@description('Prebuilt dashboard image. Empty uses a placeholder until the azd postprovision hook deploys the dashboard.')
+param dashboardImageName string = ''
+
 @description('SKU name for OpenAI.')
 param openAiSkuName string = 'S0'
 
@@ -28,7 +49,6 @@ param chatGptModelName string = 'gpt-35-turbo'
 param deploymentCapacity int = 30
 
 // You can add more OpenAI instances by adding more objects to the openAiInstances object
-// Then update the apim policy xml to include the new instances
 @description('Object containing OpenAI instances. You can add more instances by adding more objects to this parameter.')
 param openAiInstances object = {
   openAi1: {
@@ -55,6 +75,18 @@ var abbrs = loadJsonContent('./abbreviations.json')
 var resourceToken = toLower(uniqueString(subscription().id, name, location))
 var prefix = '${name}-${resourceToken}'
 var tags = { 'azd-env-name': name }
+var discoveryScopeParts = [for discoveryScope in discoveryScopes: filter(split(toLower(trim(discoveryScope)), '/'), part => !empty(part))]
+var canonicalDiscoveryScopes = [for parts in discoveryScopeParts: length(parts) == 1
+  ? '/subscriptions/${parts[0]}'
+  : length(parts) == 2
+    ? '/subscriptions/${parts[1]}'
+    : '/subscriptions/${parts[1]}/resourceGroups/${parts[3]}']
+var normalizedDiscoveryScopes = union(canonicalDiscoveryScopes, [])
+var effectiveDiscoveryScopes = empty(discoveryScopes) ? [resourceGroup.id] : normalizedDiscoveryScopes
+var subscriptionScopes = filter(effectiveDiscoveryScopes, discoveryScope => length(split(discoveryScope, '/')) == 3)
+var resourceGroupScopes = filter(effectiveDiscoveryScopes, discoveryScope => length(split(discoveryScope, '/')) == 5)
+var parentSubscriptions = union(map(effectiveDiscoveryScopes, discoveryScope => split(discoveryScope, '/')[2]), [])
+var keyVaultIdParts = split(keyVaultResourceId, '/')
 
 
 
@@ -87,6 +119,73 @@ module managedIdentity 'core/security/managed-identity.bicep' = {
   }
 }
 
+module dashboardIdentity 'core/security/managed-identity.bicep' = {
+  name: 'dashboard-identity'
+  scope: resourceGroup
+  params: {
+    name: '${abbrs.managedIdentityUserAssignedIdentities}dashboard-${resourceToken}'
+    location: location
+    tags: tags
+  }
+}
+
+module subscriptionDiscoveryAccess 'core/security/discovery-subscription-access.bicep' = [for subscriptionId in parentSubscriptions: {
+  name: 'discovery-sub-${uniqueString(subscriptionId)}'
+  scope: subscription(subscriptionId)
+  params: {
+    principalId: managedIdentity.outputs.managedIdentityPrincipalId
+    grantInferenceAccess: contains(subscriptionScopes, '/subscriptions/${subscriptionId}')
+  }
+}]
+
+module resourceGroupDiscoveryAccess 'core/security/discovery-resource-group-access.bicep' = [for discoveryScope in resourceGroupScopes: {
+  name: 'discovery-rg-${uniqueString(discoveryScope)}'
+  scope: az.resourceGroup(split(discoveryScope, '/')[2], split(discoveryScope, '/')[4])
+  params: {
+    principalId: managedIdentity.outputs.managedIdentityPrincipalId
+  }
+}]
+
+module configurationAccess 'core/security/configuration-access.bicep' = {
+  name: 'configuration-access'
+  scope: az.resourceGroup(keyVaultIdParts[2], keyVaultIdParts[4])
+  params: {
+    keyVaultName: keyVaultIdParts[8]
+    principalId: managedIdentity.outputs.managedIdentityPrincipalId
+  }
+}
+
+module containerApps 'core/host/container-apps.bicep' = {
+  name: 'container-apps'
+  scope: resourceGroup
+  params: {
+    name: 'app'
+    location: location
+    tags: tags
+    containerAppsEnvironmentName: '${prefix}-containerapps-env'
+    containerRegistryName: '${replace(prefix, '-', '')}registry'
+    logAnalyticsWorkspaceName: monitoring.outputs.logAnalyticsWorkspaceName
+  }
+}
+
+// Live routing dashboard. The LB publishes to it with its managed identity.
+module dashboard 'dashboard.bicep' = {
+  name: 'dashboard'
+  scope: resourceGroup
+  params: {
+    name: replace('${take(prefix, 19)}-dash', '--', '-')
+    location: location
+    tags: tags
+    containerAppsEnvironmentName: containerApps.outputs.environmentName
+    containerRegistryName: containerApps.outputs.registryName
+    identityName: dashboardIdentity.outputs.managedIdentityName
+    lbIdentityPrincipalId: managedIdentity.outputs.managedIdentityPrincipalId
+    lbIdentityClientId: managedIdentity.outputs.managedIdentityClientId
+    appRegistrationName: '${name}-dashboard-${resourceToken}'
+    imageName: dashboardImageName
+  }
+}
+
 // Web frontend
 module web 'web.bicep' = {
   name: 'web'
@@ -96,18 +195,24 @@ module web 'web.bicep' = {
     location: location
     tags: tags
     applicationInsightsName: monitoring.outputs.applicationInsightsName
-    logAnalyticsWorkspaceName: monitoring.outputs.logAnalyticsWorkspaceName
     identityName: managedIdentity.outputs.managedIdentityName
     identityClientId: managedIdentity.outputs.managedIdentityClientId
-    containerAppsEnvironmentName: '${prefix}-containerapps-env'
-    containerRegistryName: '${replace(prefix, '-', '')}registry'
-    backend_1_url: openAis[0].outputs.openAiEndpointUri
-    backend_1_priority: 1
-    backend_2_url: openAis[1].outputs.openAiEndpointUri
-    backend_2_priority: 2
-    backend_3_url: openAis[2].outputs.openAiEndpointUri
-    backend_3_priority: 3
+    containerAppsEnvironmentName: containerApps.outputs.environmentName
+    containerRegistryName: containerApps.outputs.registryName
+    discoveryScopes: effectiveDiscoveryScopes
+    keyVaultUri: configurationAccess.outputs.keyVaultUri
+    callersFileSecretName: callersFileSecretName
+    overridesFileSecretName: overridesFileSecretName
+    slackWebhookSecretName: slackWebhookSecretName
+    imageName: imageName
+    dashboardIngestUrl: '${dashboard.outputs.uri}/ingest'
+    dashboardAudience: dashboard.outputs.clientId
   }
+  dependsOn: [
+    subscriptionDiscoveryAccess
+    resourceGroupDiscoveryAccess
+    openAis
+  ]
 }
 
 module openAis 'core/ai/cognitiveservices.bicep' = [for (config, i) in items(openAiInstances): {
@@ -152,5 +257,7 @@ module openAis 'core/ai/cognitiveservices.bicep' = [for (config, i) in items(ope
 
 output CONTAINER_APP_URL string =web.outputs.uri
 output SERVICE_WEB_NAME string = web.outputs.SERVICE_WEB_NAME
-output AZURE_REGISTRY_NAME string =web.outputs.AZURE_REGISTRY_NAME
+output DASHBOARD_URL string = dashboard.outputs.uri
+output SERVICE_DASHBOARD_NAME string = dashboard.outputs.name
+output AZURE_REGISTRY_NAME string = containerApps.outputs.registryName
 output RESOURCE_GROUP_NAME string =resourceGroup.name

@@ -14,40 +14,10 @@
                 "description": "Specifies the location for all resources."
             }
         },
-        "backend_1_url": {
-            "value": "",
+        "keyVaultResourceId": {
+            "value": "${CONFIG_KEY_VAULT_RESOURCE_ID}",
             "metadata": {
-                "description": "The URL of your first Azure OpenAI endpoint in the following format: https://[name].openai.azure.com"
-            }
-        },
-        "backend_1_priority": {
-            "value": 1,
-            "metadata": {
-                "description": "The priority of your first OpenAI endpoint (lower number means higher priority)"
-            }
-        },
-        "backend_1_api_key": {
-            "value": "",
-            "metadata": {
-                "description": "The API key of your first OpenAI endpoint"
-            }
-        },
-        "backend_2_url": {
-            "value": "",
-            "metadata": {
-                "description": "The URL of your second Azure OpenAI endpoint in the following format: https://[name].openai.azure.com"
-            }
-        },
-        "backend_2_priority": {
-            "value": 2,
-            "metadata": {
-                "description": "The priority of your second OpenAI endpoint (lower number means higher priority)"
-            }
-        },
-        "backend_2_api_key": {
-            "value": "",
-            "metadata": {
-                "description": "The API key of your second OpenAI endpoint"
+                "description": "ARM ID of the existing RBAC Key Vault containing configuration secrets."
             }
         },
         "deploymentCapacity": {

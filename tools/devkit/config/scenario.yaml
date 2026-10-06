@@ -1,0 +1,37 @@
+subscription: 00000000-0000-0000-0000-000000000001
+resourceGroup: devkit
+accounts:
+  - name: oai-swedencentral
+    region: swedencentral
+    geography: Europe
+    port: 5101
+    deployments:
+      - { name: gpt4o, model: gpt-4o, version: "2024-11-20", sku: Standard, capacity: 120 }
+      - { name: embeddings, model: text-embedding-3-large, version: "1", sku: Standard, capacity: 60 }
+  - name: oai-francecentral
+    region: francecentral
+    geography: Europe
+    port: 5102
+    deployments:
+      - { name: gpt4o, model: gpt-4o, version: "2024-11-20", sku: DataZoneStandard, capacity: 80 }
+  - name: oai-germanywestcentral
+    region: germanywestcentral
+    geography: Europe
+    port: 5103
+    deployments:
+      - { name: gpt4o, model: gpt-4o, version: "2024-11-20", sku: Standard, capacity: 50 }
+      - { name: embeddings, model: text-embedding-3-large, version: "1", sku: DataZoneStandard, capacity: 40 }
+  - name: oai-eastus2
+    region: eastus2
+    geography: United States
+    port: 5104
+    deployments:
+      - { name: gpt4o-ptu, model: gpt-4o, version: "2024-11-20", sku: ProvisionedManaged, capacity: 10 }
+      - { name: gpt4o, model: gpt-4o, version: "2024-11-20", sku: Standard, capacity: 150 }
+      - { name: embeddings, model: text-embedding-3-large, version: "1", sku: Standard, capacity: 80 }
+  - name: oai-global
+    region: swedencentral
+    geography: Europe
+    port: 5105
+    deployments:
+      - { name: gpt4o-global, model: gpt-4o, version: "2024-11-20", sku: GlobalStandard, capacity: 200 }

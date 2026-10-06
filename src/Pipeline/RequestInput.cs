@@ -1,0 +1,242 @@
+using System.Buffers;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Microsoft.AspNetCore.Http.Features;
+using openai_loadbalancer.Discovery;
+using openai_loadbalancer.Routing;
+
+namespace openai_loadbalancer.Pipeline;
+
+public sealed class RequestInput
+{
+    public const int DefaultMaximumBodyBytes = 26 * 1024 * 1024;
+    private const string DeploymentPrefix = "/openai/deployments/";
+    private readonly string originalPath;
+    private readonly bool v1;
+
+    private RequestInput(string requestedModel, bool streaming, int? maxOutputTokens, byte[] body, string path, bool v1)
+    {
+        RequestedModel = requestedModel;
+        Streaming = streaming;
+        MaxOutputTokens = maxOutputTokens;
+        Body = body;
+        originalPath = path;
+        this.v1 = v1;
+    }
+
+    public string RequestedModel { get; }
+    public bool Streaming { get; }
+    public int? MaxOutputTokens { get; }
+    public byte[] Body { get; }
+
+    public static string OperationFor(string path)
+    {
+        string rest;
+        if (path.StartsWith(DeploymentPrefix, StringComparison.Ordinal))
+        {
+            var segmentEnd = path.IndexOf('/', DeploymentPrefix.Length);
+            rest = segmentEnd < 0 ? "" : path[segmentEnd..];
+        }
+        else if (path.StartsWith("/openai/v1/", StringComparison.Ordinal)) rest = path["/openai/v1".Length..];
+        else if (path.StartsWith("/v1/", StringComparison.Ordinal)) rest = path["/v1".Length..];
+        else if (path.StartsWith("/openai/", StringComparison.Ordinal)) rest = path["/openai".Length..];
+        else rest = path;
+        return rest.Split('/', StringSplitOptions.RemoveEmptyEntries) switch
+        {
+            ["chat", "completions", ..] => "chat.completions",
+            ["completions", ..] => "completions",
+            ["responses", ..] => "responses",
+            ["embeddings", ..] => "embeddings",
+            ["audio", "transcriptions", ..] => "audio.transcriptions",
+            ["audio", "translations", ..] => "audio.translations",
+            ["audio", "speech", ..] => "audio.speech",
+            ["images", "generations", ..] => "images.generations",
+            ["images", "edits", ..] => "images.edits",
+            ["images", "variations", ..] => "images.variations",
+            ["realtime", ..] => "realtime",
+            ["files", ..] => "files",
+            ["batches", ..] => "batches",
+            ["models", ..] => "models",
+            _ => "other"
+        };
+    }
+
+    public static string? ApiVersionFor(IQueryCollection query) =>
+        query.TryGetValue("api-version", out var values) && values.Count == 1 && values[0] is { Length: >= 1 and <= 32 } version &&
+        version.All(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '-') ? version : null;
+
+    public static DiscoveredCaller? Authenticate(IHeaderDictionary headers, IReadOnlyList<DiscoveredCaller> callers)
+    {
+        string? apiKey = null;
+        string? bearerKey = null;
+        if (headers.TryGetValue("api-key", out var apiKeys))
+        {
+            if (apiKeys.Count != 1) return null;
+            apiKey = apiKeys[0];
+            if (!ValidKey(apiKey)) return null;
+        }
+        if (headers.TryGetValue("Authorization", out var authorizations))
+        {
+            if (authorizations.Count != 1) return null;
+            var authorization = authorizations[0];
+            if (authorization == null || !authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+                return null;
+            bearerKey = authorization[7..];
+            if (!ValidKey(bearerKey)) return null;
+        }
+        if (apiKey == null && bearerKey == null) return null;
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(apiKey ?? bearerKey!));
+        if (apiKey != null && bearerKey != null &&
+            !CryptographicOperations.FixedTimeEquals(hash, SHA256.HashData(Encoding.UTF8.GetBytes(bearerKey))))
+            return null;
+
+        DiscoveredCaller? match = null;
+        Span<byte> expected = stackalloc byte[32];
+        foreach (var caller in callers)
+        {
+            foreach (var configuredHash in caller.KeyHashes)
+            {
+                if (!configuredHash.StartsWith("sha256:", StringComparison.Ordinal) || configuredHash.Length != 71)
+                    continue;
+                if (Convert.FromHexString(configuredHash.AsSpan(7), expected, out var charsRead, out var bytesWritten)
+                    == OperationStatus.Done && charsRead == 64 && bytesWritten == 32 && CryptographicOperations.FixedTimeEquals(hash, expected))
+                    match ??= caller;
+            }
+        }
+        return match;
+    }
+
+    public static string? ResolveZone(IHeaderDictionary headers, DiscoveredCaller caller)
+    {
+        if (!headers.TryGetValue("x-lb-data-zone", out var zones)) return caller.Zones.FirstOrDefault();
+        if (zones.Count != 1) return null;
+        var zone = zones[0];
+        return zone != null && caller.Zones.Contains(zone, StringComparer.Ordinal) ? zone : null;
+    }
+
+    public static async Task<RequestInput?> ReadAsync(HttpContext context, CancellationToken cancellationToken,
+        int maximumBodyBytes = DefaultMaximumBodyBytes)
+    {
+        if (context.Request.ContentLength > maximumBodyBytes)
+        {
+            context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+            return null;
+        }
+        // The server limit sits one byte above ours, so this method reports oversized bodies itself.
+        if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } limit)
+            limit.MaxRequestBodySize = maximumBodyBytes + 1L;
+        var path = context.Request.Path.Value ?? "";
+        if (path.Contains('\\') || path.Split('/').Any(segment => segment is "." or ".."))
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            return null;
+        }
+        var isV1 = path.StartsWith("/v1/", StringComparison.Ordinal) || path.StartsWith("/openai/v1/", StringComparison.Ordinal);
+        string? model = null;
+        if (!isV1 && path.StartsWith(DeploymentPrefix, StringComparison.Ordinal))
+        {
+            var segment = path[DeploymentPrefix.Length..].Split('/', 2)[0];
+            if (segment.Length != 0) model = Uri.UnescapeDataString(segment);
+        }
+        if (!isV1 && string.IsNullOrWhiteSpace(model))
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            return null;
+        }
+
+        using var buffered = new MemoryStream();
+        var buffer = ArrayPool<byte>.Shared.Rent(81920);
+        try
+        {
+            while (true)
+            {
+                var count = await context.Request.Body.ReadAsync(buffer.AsMemory(0,
+                    Math.Min(buffer.Length, maximumBodyBytes - (int)buffered.Length + 1)), cancellationToken);
+                if (count == 0) break;
+                if (buffered.Length + count > maximumBodyBytes)
+                {
+                    context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+                    return null;
+                }
+                buffered.Write(buffer, 0, count);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+
+        var body = buffered.ToArray();
+        var streaming = false;
+        int? maxOutputTokens = null;
+        try
+        {
+            if (body.Length != 0)
+            {
+                using var json = JsonDocument.Parse(body);
+                if (json.RootElement.ValueKind != JsonValueKind.Object)
+                {
+                    if (isV1) model = null;
+                }
+                else
+                {
+                    streaming = json.RootElement.TryGetProperty("stream", out var stream) && stream.ValueKind == JsonValueKind.True;
+                    maxOutputTokens = OutputLimit(json.RootElement, "max_completion_tokens") ?? OutputLimit(json.RootElement, "max_tokens")
+                        ?? OutputLimit(json.RootElement, "max_output_tokens");
+                    if (isV1)
+                    {
+                        model = json.RootElement.TryGetProperty("model", out var modelValue) && modelValue.ValueKind == JsonValueKind.String
+                            ? modelValue.GetString() : null;
+                        var names = new HashSet<string>(StringComparer.Ordinal);
+                        foreach (var property in json.RootElement.EnumerateObject())
+                            if (!names.Add(property.Name)) model = null;
+                    }
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            if (isV1) model = null;
+        }
+        if (string.IsNullOrWhiteSpace(model))
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            return null;
+        }
+        return new RequestInput(model, streaming, maxOutputTokens, body, path, isV1);
+    }
+
+    public byte[] BodyFor(Deployment deployment)
+    {
+        if (!v1) return Body;
+        var json = JsonNode.Parse(Body)!.AsObject();
+        json["model"] = deployment.DeploymentName;
+        return JsonSerializer.SerializeToUtf8Bytes(json);
+    }
+
+    public PathString PathFor(Deployment deployment)
+    {
+        if (v1) return new PathString(originalPath.StartsWith("/v1/", StringComparison.Ordinal) ? "/openai" + originalPath : originalPath);
+        var segmentEnd = originalPath.IndexOf('/', DeploymentPrefix.Length);
+        var suffix = segmentEnd < 0 ? "" : originalPath[segmentEnd..];
+        return PathString.FromUriComponent(DeploymentPrefix + Uri.EscapeDataString(deployment.DeploymentName))
+            .Add(new PathString(suffix));
+    }
+
+    private static int? OutputLimit(JsonElement body, string name) =>
+        body.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var limit) && limit >= 0
+            ? limit : null;
+
+    private static bool ValidKey(string? key)
+    {
+        if (key == null || key.Length != 47 || !key.StartsWith("lbk_", StringComparison.Ordinal)) return false;
+        var encoded = key[4..];
+        foreach (var character in encoded)
+            if (!char.IsAsciiLetterOrDigit(character) && character != '-' && character != '_') return false;
+        Span<byte> decoded = stackalloc byte[32];
+        return Convert.TryFromBase64String(encoded.Replace('-', '+').Replace('_', '/') + "=", decoded, out var written)
+            && written == 32 && Convert.ToBase64String(decoded).TrimEnd('=').Replace('+', '-').Replace('/', '_') == encoded;
+    }
+}
