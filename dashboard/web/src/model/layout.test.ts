@@ -102,6 +102,14 @@ describe("layout at production scale", () => {
           }
         });
 
+  test("long caller names widen the caller column instead of running off the left edge", () => {
+    const long = ["dev-ops-api", "prod-relisten-api", "prod-relisten-backend"];
+    const layout = layoutScene({ deployments: production, callers: long, size: { width: 1600, height: 900 }, rem: 15, idle: realisticIdle });
+    const boxes = labelBoxes(layout, production).filter((box) => box.name.startsWith("caller "));
+    expect(boxes.every((box) => box.left >= 0)).toBe(true);
+    expect(overlaps(labelBoxes(layout, production))).toEqual([]);
+  });
+
   // 1184×636 is the scene's box in a 1600×900 window, measured in Chrome.
   test("realistic production traffic fits 1600×900 in the region view without scrolling", () => {
     const layout = layoutScene({ deployments: production, callers, size: { width: 1184, height: 636 }, rem: 15, view: "region", idle: realisticIdle });

@@ -113,6 +113,10 @@ const MIN_GAP = 0.5;
 const REFUSED_SPACE = 2.8;
 export const IDLE_MODELS = "idle-models";
 const richer: Record<Density, Density> = { one: "two", two: "full", full: "full" };
+/** Caller name advance in rem per character (Geist at 0.92rem, about 0.56 em), and the widest name before it is cut. */
+const CHAR_REM = 0.52;
+export const CALLER_NAME_MAX = 14;
+
 /** This many deployments of one group with the same problem share one lane; fewer keep a lane each. */
 export const FOLD_PROBLEMS = 4;
 
@@ -145,7 +149,9 @@ export function layoutScene(input: LayoutInput): SceneLayout {
   const groups = buildGroups(view, deployments, idle, problems, expanded, rem);
 
   // Columns: caller names left of their bars, the LB close by, group boxes in the middle, deployment labels on the right.
-  const callersX = 9.5 * rem;
+  // The caller column is as wide as its longest name (estimated, see CALLER_NAME_MAX), so no name runs off the left edge.
+  const longest = Math.min(CALLER_NAME_MAX, Math.max(0, ...callers.map((id) => id.length * CHAR_REM)));
+  const callersX = Math.max(9.5, 1 + longest + 0.7) * rem;
   const lbX = callersX + 6 * rem;
   const discs = width - 15 * rem;
   const bars = discs - 1.5 * rem;
