@@ -42,6 +42,7 @@ Discovery settings are startup settings. File contents reload at startup and on 
 Discovery reads `OpenAI` and `AIServices` accounts through the configured ARM origin.
 Pagination links must retain that origin's scheme and authority. ARM redirects are not followed.
 It keeps successful deployments with supported SKUs and deduplicates overlapping scopes.
+A supported deployment without a valid name, model, version, or capacity is skipped with a warning; the rest of the refresh goes on.
 The managed identity needs Reader on discovery scopes and access to subscription location metadata.
 It also needs Cognitive Services OpenAI User on every backend account.
 Backend tokens use `https://cognitiveservices.azure.com/.default` and remain cached until two minutes before expiry.

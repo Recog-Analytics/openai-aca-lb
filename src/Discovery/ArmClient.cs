@@ -1,13 +1,16 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
 using Azure.Core;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using openai_loadbalancer.Routing;
 
 namespace openai_loadbalancer.Discovery;
 
-public sealed class ArmClient(HttpClient httpClient, TokenCredential credential, IOptions<DiscoveryOptions> options) : IArmClient
+public sealed class ArmClient(HttpClient httpClient, TokenCredential credential, IOptions<DiscoveryOptions> options,
+    ILogger<ArmClient>? logger = null) : IArmClient
 {
+    private readonly ILogger<ArmClient> logger = logger ?? NullLogger<ArmClient>.Instance;
     private readonly Uri managementEndpoint = new(options.Value.ArmEndpoint, UriKind.Absolute);
     private static readonly TokenRequestContext TokenContext = new(["https://management.azure.com/.default"]);
     private const string CognitiveServicesApiVersion = "2024-10-01";
@@ -27,20 +30,37 @@ public sealed class ArmClient(HttpClient httpClient, TokenCredential credential,
         var deployments = new List<DiscoveredDeployment>();
         foreach (var item in items)
         {
-            var properties = item.GetProperty("properties");
-            if (Text(properties, "provisioningState") != "Succeeded")
+            if (Field(item, "properties") is not { } properties || TextOrNull(properties, "provisioningState") != "Succeeded")
                 continue;
-            var sku = item.GetProperty("sku");
-            var skuName = Text(sku, "name");
-            if (SkuMapping.FromSku(skuName) == null)
+            // Unsupported SKUs are skipped silently as before; a supported deployment without a usable name, model, version or
+            // capacity is skipped with a warning, so one malformed entry never fails the whole refresh.
+            var sku = Field(item, "sku");
+            var skuName = sku is { } skuValue ? TextOrNull(skuValue, "name") : null;
+            if (skuName != null && SkuMapping.FromSku(skuName) == null)
                 continue;
-            var model = properties.GetProperty("model");
-            deployments.Add(new(account.Id, account.Name, account.Endpoint, account.Region, Text(item, "name"),
-                new ModelKey(Text(model, "name"), Text(model, "version")), skuName,
-                sku.GetProperty("capacity").GetDecimal(), "Succeeded"));
+            var name = TextOrNull(item, "name");
+            var model = Field(properties, "model");
+            var modelName = model is { } modelValue ? TextOrNull(modelValue, "name") : null;
+            var version = model is { } versionValue ? TextOrNull(versionValue, "version") : null;
+            decimal capacity = 0;
+            if (skuName == null || name == null || modelName == null || version == null || Field(sku!.Value, "capacity") is not { } capacityValue ||
+                capacityValue.ValueKind != JsonValueKind.Number || !capacityValue.TryGetDecimal(out capacity) || capacity < 0)
+            {
+                logger.LogWarning("Skipping deployment {DeploymentName} in {AccountId}: ARM returned no valid SKU, name, model, version or capacity.",
+                    name ?? "(unnamed)", account.Id);
+                continue;
+            }
+            deployments.Add(new(account.Id, account.Name, account.Endpoint, account.Region, name,
+                new ModelKey(modelName, version), skuName, capacity, "Succeeded"));
         }
         return deployments;
     }
+
+    private static JsonElement? Field(JsonElement item, string name) =>
+        item.ValueKind == JsonValueKind.Object && item.TryGetProperty(name, out var value) && value.ValueKind != JsonValueKind.Null ? value : null;
+
+    private static string? TextOrNull(JsonElement item, string name) =>
+        Field(item, name) is { ValueKind: JsonValueKind.String } value && !string.IsNullOrWhiteSpace(value.GetString()) ? value.GetString() : null;
 
     public async Task<IReadOnlyDictionary<string, string>> GetLocationsAsync(string subscriptionId, CancellationToken cancellationToken)
     {

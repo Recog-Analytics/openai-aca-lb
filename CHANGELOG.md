@@ -54,6 +54,7 @@
 
 ### Fixed
 
+- Skip a malformed ARM deployment (no valid name, model, version, or capacity) with a warning instead of failing the whole discovery refresh.
 - Run the post-provision hook under POSIX `sh`, as `azure.yaml` declares: replace the bash-only placeholder substitution with `sed`.
 - Count only authenticated requests in the retry budget, so rejected caller keys cannot increase permitted retries.
 

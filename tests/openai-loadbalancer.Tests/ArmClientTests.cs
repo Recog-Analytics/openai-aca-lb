@@ -39,6 +39,33 @@ public class ArmClientTests
     }
 
     [Fact]
+    public async Task SkipsMalformedDeploymentsWithAWarningInsteadOfFailingDiscovery()
+    {
+        using var handler = new FakeHandler();
+        handler.Responses.Enqueue("""
+            {"value":[
+              {"name":"no-capacity","sku":{"name":"Standard"},"properties":{"provisioningState":"Succeeded","model":{"name":"gpt-4o","version":"1"}}},
+              {"name":"text-capacity","sku":{"name":"Standard","capacity":"lots"},"properties":{"provisioningState":"Succeeded","model":{"name":"gpt-4o","version":"1"}}},
+              {"name":"no-model","sku":{"name":"Standard","capacity":10},"properties":{"provisioningState":"Succeeded"}},
+              {"name":"no-version","sku":{"name":"Standard","capacity":10},"properties":{"provisioningState":"Succeeded","model":{"name":"gpt-4o"}}},
+              {"name":7,"sku":{"name":"Standard","capacity":10},"properties":{"provisioningState":"Succeeded","model":{"name":"gpt-4o","version":"1"}}},
+              {"name":"no-sku","properties":{"provisioningState":"Succeeded","model":{"name":"gpt-4o","version":"1"}}},
+              {"name":"negative","sku":{"name":"Standard","capacity":-1},"properties":{"provisioningState":"Succeeded","model":{"name":"gpt-4o","version":"1"}}},
+              {"name":"no-properties"},
+              {"name":"good","sku":{"name":"Standard","capacity":10},"properties":{"provisioningState":"Succeeded","model":{"name":"gpt-4o","version":"1"}}}
+            ]}
+            """);
+        using var http = new HttpClient(handler);
+        var logger = new TestLogger<ArmClient>();
+        var client = new ArmClient(http, new FakeCredential(), Options.Create(new DiscoveryOptions()), logger);
+        var deployment = Assert.Single(await client.GetDeploymentsAsync(DiscoveryRefreshTests.Account, CancellationToken.None));
+        Assert.Equal(("good", 10m), (deployment.DeploymentName, deployment.Capacity));
+        // Every malformed supported deployment is named in a warning; the one without properties is not a deployment to report.
+        Assert.Equal(7, logger.Entries.Count(entry => entry.Level == Microsoft.Extensions.Logging.LogLevel.Warning));
+        Assert.Contains(logger.Entries, entry => entry.Message.Contains("no-capacity", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task ReadsModelSkuCapacityAndSkipsUnsuccessfulAndExcludedSkuDeployments()
     {
         using var handler = new FakeHandler();
