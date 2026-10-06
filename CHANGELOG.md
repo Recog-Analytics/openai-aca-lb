@@ -39,6 +39,7 @@
 ### Changed
 
 - `/admin/requests` returns only the authenticated caller's requests; the limit applies after that filter.
+- An alias may equal the model name of an excluded, unsuccessful, or unsupported deployment; only routable deployments block it.
 - Move the LB Development listener to port 5080 to avoid macOS AirPlay.
 - Trim the devkit page to traffic, presets, and account controls, with a link to the dashboard. Remove its monitoring views and the `/devkit/state` and `/devkit/requests` proxy endpoints.
 - Move the shared request and dashboard wire records into `src/Contracts`, so the dashboard no longer references the LB executable.

@@ -268,6 +268,20 @@ public class RoutingTableTests
     }
 
     [Fact]
+    public void AliasMayEqualAModelOnlyExcludedOrFailedDeploymentsServe()
+    {
+        var overrides = new RoutingOverrides
+        {
+            Aliases = new() { ["gpt-4o"] = "o3@1", ["legacy"] = "o3@1" },
+            Exclude = [new() { Account = "oai-old" }],
+        };
+        var table = Build(overrides, Discover(account: "oai-old"), Discover("legacy", state: "Failed", model: "legacy"),
+            Discover("o3", "1", model: "o3"));
+        Assert.Equal(new ModelKey("o3", "1"), table.ResolveModel("gpt-4o").Key);
+        Assert.Equal(new ModelKey("o3", "1"), table.ResolveModel("legacy").Key);
+    }
+
+    [Fact]
     public void DeploymentNameResolvesToPoolOfThatNameOnly()
     {
         var table = Build(null, Discover("llm-gpt-4omini", account: "west", model: "gpt-4o-mini"),

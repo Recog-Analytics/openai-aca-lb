@@ -15,10 +15,6 @@ public sealed class RoutingTableBuilder(ILogger<RoutingTableBuilder>? logger = n
     public RoutingTable Build(IEnumerable<DiscoveredDeployment> deployments, RegionGeography geography, RoutingOverrides overrides)
     {
         deployments = deployments.ToArray();
-        var modelNames = deployments.Select(item => item.Model.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var shadowing = overrides.Aliases.Keys.Where(modelNames.Contains).Order(StringComparer.Ordinal).ToArray();
-        if (shadowing.Length != 0)
-            throw new ArgumentException($"Aliases cannot equal a discovered model name: {string.Join(", ", shadowing)}.");
         var regions = overrides.Regions.ToDictionary(item => item.Key, item => item.Value, StringComparer.OrdinalIgnoreCase);
         var result = new List<Deployment>();
         var identities = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -60,6 +56,11 @@ public sealed class RoutingTableBuilder(ILogger<RoutingTableBuilder>? logger = n
                 throw new ArgumentException($"Duplicate deployment '{deployment.Id}'.");
             result.Add(deployment);
         }
+        // Only routable deployments can shadow an alias: an excluded, failed or unsupported one never resolves.
+        var modelNames = result.Select(item => item.Model.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var shadowing = overrides.Aliases.Keys.Where(modelNames.Contains).Order(StringComparer.Ordinal).ToArray();
+        if (shadowing.Length != 0)
+            throw new ArgumentException($"Aliases cannot equal a discovered model name: {string.Join(", ", shadowing)}.");
         foreach (var group in result.GroupBy(item => item.DeploymentName, StringComparer.OrdinalIgnoreCase))
             if (group.Select(item => item.Model).Distinct().Count() > 1)
                 logger.LogWarning("Deployment name {DeploymentName} serves several model keys ({Models}); its pool routes to all of them.",

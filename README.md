@@ -137,7 +137,7 @@ Unknown properties, duplicate YAML keys, duplicate deployment overrides, and inv
 
 An alias maps a client name to a model key (`name` or `name@version`) or to a deployment name.
 Alias names are case-insensitive, unique, and cannot contain `@`.
-An alias that equals a discovered model name fails the refresh with a configuration error.
+An alias that equals the model name of a routable deployment fails the refresh with a configuration error. Excluded, unsuccessful, and unsupported deployments do not count.
 An alias whose target is not discovered returns 400 at request time.
 
 `degradedFloorSeconds` defaults to 2. The optional `degradedThresholdSeconds` applies when no peer has enough TTFB samples.
