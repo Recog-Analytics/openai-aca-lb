@@ -123,6 +123,25 @@ public class RequestHistoryTests
     }
 
     [Fact]
+    public async Task EndpointShowsOnlyTheAuthenticatedCallersRequests()
+    {
+        await using var server = await Server.StartAsync();
+        server.History.Add(Record(1));
+        server.History.Add(Record(2) with { Caller = "other-caller" });
+        server.History.Add(Record(3));
+        using var request = AuthorizedRequest("/admin/requests?limit=1");
+        using var response = await server.Client.SendAsync(request);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        // The limit applies after the filter: the newest own request, not the newest of all.
+        Assert.Equal("3", Assert.Single(json.RootElement.EnumerateArray()).GetProperty("id").GetString());
+        using var all = AuthorizedRequest("/admin/requests");
+        using var allResponse = await server.Client.SendAsync(all);
+        var text = await allResponse.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("other-caller", text);
+        Assert.Equal(2, JsonDocument.Parse(text).RootElement.GetArrayLength());
+    }
+
+    [Fact]
     public async Task EndpointRejectsUnknownCallerKey()
     {
         await using var server = await Server.StartAsync();

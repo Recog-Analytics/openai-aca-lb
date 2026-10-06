@@ -305,8 +305,8 @@ The response includes `replica`, `refreshedAt`, and deployments with routing fie
 Health includes state, account circuit status, attempt eligibility, throttle delay, and TTFB p95.
 Responses use `Cache-Control: no-store`. Invalid keys return 401; no discovery snapshot returns 503.
 
-`GET /admin/requests?limit=N` uses the same caller authentication and returns recent completed proxy requests, newest first.
-Each replica retains 500 entries in memory. The default limit is 100; larger limits stop at 500.
+`GET /admin/requests?limit=N` uses the same caller authentication and returns that caller's recent completed proxy requests, newest first. Other callers' requests never appear.
+Each replica retains 500 entries in memory, for all callers. The default limit is 100; larger limits stop at 500. The limit applies after the caller filter.
 Invalid or nonpositive limits return 400. Health and admin requests do not enter the feed.
 Entries include an ID, UTC start time, caller, requested model, resolved model key, zone, and streaming flag.
 They also include final HTTP status, outcome, total duration in milliseconds, and the backend attempt chain.

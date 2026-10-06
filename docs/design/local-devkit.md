@@ -7,7 +7,7 @@ Status: agreed, not implemented. Goal: run the load balancer (LB) locally agains
 1. `Discovery:ArmEndpoint` (default `https://management.azure.com`). Pagination links must match its scheme and authority. HTTP is allowed only in Development.
 2. `Discovery:RefreshInterval` (default 5 min).
 3. `Azure:Credential` = `ManagedIdentity` (default) | `Fake`. `Fake` returns a static token for ARM and backends. Outside the `Development` environment, `Fake` fails startup.
-4. `GET /admin/requests?limit=N`: authenticated like `/admin/state`, in-memory ring buffer of the last 500 requests per replica. Each entry has:
+4. `GET /admin/requests?limit=N`: authenticated like `/admin/state`, in-memory ring buffer of the last 500 requests per replica; a caller sees only its own requests. Each entry has:
    - id, start time, caller name, requested model, resolved model key, zone, streaming flag
    - final status, total duration
    - operation, API version, request bytes, requested output limit
