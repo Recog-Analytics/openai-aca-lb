@@ -1,5 +1,5 @@
 import { motion } from "motion/react";
-import { percent } from "../model/attention";
+import { percent, rate as formatRate } from "../model/attention";
 import type { Flow } from "../model/funnel";
 import { replicaLabel } from "../model/names";
 import { durationLabel, outcomeMix, placeName, statusText, tierName, weightLabel, type NodeVisual } from "../model/state";
@@ -57,7 +57,7 @@ export function NodeCard({ item, label, replicaOrder, replicaNumbers, rate, flow
         <dt>Zone</dt><dd>{d.zone}</dd>
         <dt>Weight</dt><dd>{weightLabel(d.weight, d.tier)}</dd>
         <dt>p95 TTFB</dt><dd>{durationLabel(d.p95TtfbMs)}</dd>
-        <dt>Attempts</dt><dd>{rate ? `${rate.requestsPerSecond.toFixed(1)}/s` : "none"}</dd>
+        <dt>Attempts</dt><dd>{rate ? formatRate(rate.requestsPerSecond) : "none"}</dd>
       </dl>
       {flow && total > 0 && (
         <dl className="facts traffic">

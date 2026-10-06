@@ -4,6 +4,7 @@
 
 ### Added
 
+- Show request counts next to every share in the dashboard funnel and top figures, the total request count in the figures and the LB column, and rates in the unit that keeps them readable ("0.5/min" instead of "0.0/s"). Long caller names widen the caller column instead of being cut off.
 - Route a requested deployment name to the pool of every deployment with that name, across accounts and regions. Resolution order: model key, alias, deployment name, 400. Same-model deployments with different names stay separate pools.
 - Map legacy names to a model key or a deployment name with `aliases` in the override file. An alias that equals a discovered model name fails the refresh.
 - Report the pool kind and pool name in `/admin/requests` and dashboard routes.

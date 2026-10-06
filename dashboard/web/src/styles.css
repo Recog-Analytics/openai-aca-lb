@@ -142,6 +142,7 @@ button:active:not(:disabled) { scale: 0.96; }
 .kpis dt { color: var(--muted); font-size: 0.8rem; }
 .kpis dd { display: flex; align-items: baseline; gap: 0.4rem; }
 .kpi-value { font-size: 1.65rem; font-weight: 560; line-height: 1.1; }
+.kpi-detail { font-variant-numeric: tabular-nums; }
 .kpi-change { font-size: 0.78rem; color: var(--muted); white-space: nowrap; }
 .kpi-change:empty { display: none; }
 .kpi-change[data-tone="good"] { color: var(--healthy); }
@@ -170,6 +171,8 @@ button:active:not(:disabled) { scale: 0.96; }
   transition-property: opacity; transition-duration: 300ms; transition-timing-function: var(--ease-out);
 }
 .flow-label[data-align="end"] { translate: -100% -50%; padding: 0 0.7rem 0 0; align-items: flex-end; }
+/* Matches CALLER_NAME_MAX in layout.ts: a longer caller name is cut, and its title gives it in full. */
+.flow-label[data-align="end"] .flow-name { max-width: 14rem; overflow: hidden; text-overflow: ellipsis; }
 .deployment { pointer-events: auto; }
 .flow-name { font-size: 0.92rem; font-weight: 540; color: var(--text); }
 .flow-weight { color: var(--muted); font-weight: 400; font-size: 0.8rem; margin-left: 0.2rem; }
@@ -181,6 +184,7 @@ button:active:not(:disabled) { scale: 0.96; }
 }
 .flow-share[data-zero] { color: var(--muted); font-weight: 480; }
 .flow-delta { font-size: 0.75rem; color: var(--muted); }
+.flow-count { font-size: 0.8rem; font-weight: 450; color: var(--muted); font-variant-numeric: tabular-nums; }
 .flow-delta[data-direction="up"]::before { content: "▲ "; font-size: 0.6rem; }
 .flow-delta[data-direction="down"]::before { content: "▼ "; font-size: 0.6rem; }
 .flow-note, .flow-inline { font-size: 0.8rem; color: var(--muted); }
@@ -198,7 +202,7 @@ button:active:not(:disabled) { scale: 0.96; }
 }
 .lb-head strong { color: var(--text); font-weight: 620; margin-left: 0.15rem; }
 .lb-caption { margin-bottom: -0.3rem; font-size: 0.75rem; }
-.lb-tiers { display: grid; grid-template-columns: auto auto auto; column-gap: 0.5rem; row-gap: 0.15rem; align-items: baseline; }
+.lb-tiers { display: grid; grid-template-columns: auto auto auto auto; column-gap: 0.5rem; row-gap: 0.15rem; align-items: baseline; }
 .lb-tier { display: contents; pointer-events: auto; }
 .lb-tier > span:first-child { text-align: right; }
 .lb-tier > strong { font-weight: 620; font-size: 0.875rem; margin: 0; }

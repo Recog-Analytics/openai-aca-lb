@@ -127,6 +127,21 @@ export function findIssues(frame: FrameState | null, funnel: Funnel, t: number, 
 
 export interface Verdict { tone: Tone; title: string; kind: IssueKind | null }
 
+const compact = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
+
+/** Formats a request count: "8", "940", "1.2K", "3.4M". */
+export function count(value: number): string {
+  return compact.format(value);
+}
+
+/** Formats a request rate, in the unit that keeps it above 0.1: "12/s", "0.4/s", "0.5/min", "2/h", "< 0.1/h". */
+export function rate(perSecond: number): string {
+  if (perSecond <= 0) return "0/s";
+  if (perSecond * 3600 < 0.1) return "<\u202f0.1/h";
+  const [value, unit] = perSecond >= 0.1 ? [perSecond, "s"] : perSecond * 60 >= 0.1 ? [perSecond * 60, "min"] : [perSecond * 3600, "h"];
+  return `${value.toFixed(value < 10 ? 1 : 0).replace(/\.0$/, "")}/${unit}`;
+}
+
 /**
  * Formats a share of requests: "12 %", "0.4 %", "< 0.1 %", "99.7 %". A share is never rounded to 0 % or 100 %
  * unless it is exactly that, so a single failure stays visible.
