@@ -463,7 +463,7 @@ The template preserves the live policy references and `OnceNewDefaultVersionAvai
 All use model `gpt-6-sol`, version `2026-09-22`, and SKU `DataZoneStandard`.
 Capacity units are 1,000 tokens/min. The allocation totals 6,000 units and consumes the shared EU quota checked on 2026-10-28.
 This is allocated capacity, not measured traffic. Check current quota and model versions before changing the allocation.
-Automatic upgrades can advance live versions; update the template before applying it after such an upgrade.
+Automatic upgrades can advance regions independently. Refresh each allocation's `version` from its live deployment before applying capacity changes.
 To move capacity within a full quota pool, first deploy reductions, then deploy increases.
 
 From the repository root, lint the template and preview the production change:
