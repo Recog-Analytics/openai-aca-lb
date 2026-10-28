@@ -5,14 +5,28 @@ on:
       - main
     paths:
       - "**/*.bicep"
+      - ".github/workflows/bicep-audit.yml"
   pull_request:
     branches: 
       - main
     paths:
       - "**/*.bicep"
+      - ".github/workflows/bicep-audit.yml"
   workflow_dispatch:
 
 jobs:
+  production-deployments:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Bicep
+        run: az bicep install --version v0.47.16
+      - name: Validate production model deployments
+        run: az bicep lint --file infra/production/gpt-6-sol.bicep
+
   build:
     runs-on: ubuntu-latest
     permissions:
