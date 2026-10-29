@@ -445,6 +445,57 @@ az bicep build --file infra/dashboard.bicep
 Repeat the command for each changed Bicep template.
 The former portal deployment and published legacy image use the removed static configuration; deploy the current source instead.
 
+### Production GPT-6 Sol deployments
+
+[`infra/production/gpt-6-sol.bicep`](infra/production/gpt-6-sol.bicep) manages the five existing `recog-llm-gpt-6-sol` deployments in `rg-recog-llm`.
+It is a standalone resource-group template, separate from the sample accounts in `infra/main.bicep` and `azd up`.
+The accounts and their `recog-llm-gpt-5_4-rai-policy` policies must already exist.
+The template preserves the live policy references and `OnceNewDefaultVersionAvailable` upgrade setting.
+
+| Account | Region | Tokens/min | Requests/min |
+| --- | --- | ---: | ---: |
+| `recog-llm-swc` | Sweden Central | 3,330,000 | 3,330 |
+| `recog-llm-frc` | France Central | 670,000 | 670 |
+| `recog-llm-gwc` | Germany West Central | 670,000 | 670 |
+| `recog-llm-we` | West Europe | 665,000 | 665 |
+| `recog-llm-pc` | Poland Central | 665,000 | 665 |
+
+All use model `gpt-6-sol`, version `2026-09-22`, and SKU `DataZoneStandard`.
+Capacity units are 1,000 tokens/min. The allocation totals 6,000 units and consumes the shared EU quota checked on 2026-10-28.
+This is allocated capacity, not measured traffic. Check current quota and model versions before changing the allocation.
+Automatic upgrades can advance regions independently.
+Before every `az deployment group create` apply, refresh each allocation's `version` from its live deployment.
+Refresh before running `what-if`, so the preview and apply use the same template.
+This includes applies that do not change capacity.
+To move capacity within a full quota pool, first deploy reductions, then deploy increases.
+
+From the repository root, lint the template and preview the production change:
+
+```sh
+az bicep lint --file infra/production/gpt-6-sol.bicep
+az deployment group what-if \
+  --subscription eeab0fb5-c517-4ab8-9902-4b4794effe93 \
+  --resource-group rg-recog-llm \
+  --name gpt-6-sol-eu \
+  --mode Incremental \
+  --template-file infra/production/gpt-6-sol.bicep
+```
+
+Review the preview, then apply it:
+
+```sh
+az deployment group create \
+  --subscription eeab0fb5-c517-4ab8-9902-4b4794effe93 \
+  --resource-group rg-recog-llm \
+  --name gpt-6-sol-eu \
+  --mode Incremental \
+  --template-file infra/production/gpt-6-sol.bicep
+```
+
+Use incremental mode: this template manages only these five deployments in the shared resource group.
+The LB already discovers this group and has inference access. Its next discovery refresh loads deployment changes, normally within five minutes.
+CI lints the template; it does not deploy to Azure.
+
 ### Dashboard in Azure
 
 `infra/dashboard.bicep` deploys the dashboard as a separate Container App with external ingress and exactly one replica.
