@@ -465,6 +465,7 @@ Capacity units are 1,000 tokens/min. The allocation totals 6,000 units and consu
 This is allocated capacity, not measured traffic. Check current quota and model versions before changing the allocation.
 Automatic upgrades can advance regions independently.
 Before every `az deployment group create` apply, refresh each allocation's `version` from its live deployment.
+Refresh before running `what-if`, so the preview and apply use the same template.
 This includes applies that do not change capacity.
 To move capacity within a full quota pool, first deploy reductions, then deploy increases.
 
